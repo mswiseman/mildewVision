@@ -7,11 +7,11 @@ from tkinter import messagebox
 import tkinter as tk
 import argparse
 
-# Parse arguments
+# Argument parser for command line options
 parser = argparse.ArgumentParser()
-parser.add_argument('--practice', action='store_true')
-parser.add_argument('--name', type=str)
-args = parser.parse_args()
+parser.add_argument('--practice', action='store_true')  # Add a boolean 'practice' argument
+parser.add_argument('--name', type=str)  # Add a string 'name' argument
+args = parser.parse_args()  # Parse the provided arguments
 
 # Create a DataFrame to store the responses
 df = pd.DataFrame(columns=['image_id', 'response', 'time_taken'])
@@ -19,10 +19,11 @@ df = pd.DataFrame(columns=['image_id', 'response', 'time_taken'])
 # Get the list of image files
 image_folder = r"C:\Users\Intel User\Desktop\test_set"
 
+# If the 'practice' argument is True, change the image folder
 if args.practice:
     image_folder = r"C:\Users\Intel User\Desktop\practice"
 
-image_files = os.listdir(image_folder)
+image_files = os.listdir(image_folder)  # List all files in the image folder
 
 # Shuffle the list of image files
 random.shuffle(image_files)
@@ -52,6 +53,7 @@ def handle_button_click(response):
     # Go to the next image
     next_image()
 
+# Define the labels for the response buttons
 response_labels = ["0_clear", "1_hyphae", "2_conidiophores"]
 for response in [0, 1, 2]:
     button = tk.Button(window, text=response_labels[response], command=lambda response=response: handle_button_click(response))
@@ -60,7 +62,7 @@ for response in [0, 1, 2]:
 # Variable to keep track of the current image index
 i = -1
 
-# Add name to csv
+# Get the name from the arguments
 name = args.name
 
 # Function to go to the next image
@@ -72,7 +74,7 @@ def next_image():
 
     # Check if we've gone through all the images
     if i >= len(image_files):
-        # Save the DataFrame to a CSV file
+        # Save the DataFrame to a CSV file with the name from the arguments
         df.to_csv(f'{name}_response.csv', index=False)
 
         # Display a completion message
