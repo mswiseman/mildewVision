@@ -37,6 +37,8 @@ Variables:
 
 To use:
 python images_to_test_train_hdf5.py -sample_size 100 -blur_threshold_factor 30 -image_size 224 224 -input_dir /Users/michelewiseman/Desktop/test -output_dir /Users/michelewiseman/Desktop/test
+
+Written by Michele Wiseman of Oregon State University
 """
 
 # Add argparse arguments
