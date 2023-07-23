@@ -13,3 +13,7 @@ Various graphs and visualizations with the human data.
 
 **[4. random_image_fr_hdf5.py](https://github.com/mswiseman/mildewVision/blob/main/humanvsmachine/random_image_fr_hdf5.py)** <br>
 Use this to create a random patch dataset. 
+
+**[5. test_set](https://github.com/mswiseman/mildewVision/blob/main/humanvsmachine/test_set)** <br>
+Directory of patches used to test experts and our best classification and segmentation models. 
+
