@@ -14,7 +14,9 @@ Statistics of color factors
 Written by Tian Qiu, Cornell University with modifications by Michele Wiseman, Oregon State University
 
 To run:
-    python stat_brightness.py --dataset_path <path_to_dataset> --trays [1 2 3 4]
+    python stat_brightness.py --dataset_path <path_to_dataset> 
+
+    e.g.
     
     python stat_brightness.py --dataset_path /d/Stacked/Deposition_Study/6-14-2023_6dpi/ 
 """
