@@ -7,13 +7,13 @@ from openpyxl import load_workbook
 
 """
 To run this script, you need to pass the path to the text file containing the plant lines as the first argument:
-python generate_csvs.py <input_file>
+python generateBlackbirdDatasheet.py <input_file>
 
 This script produces two CSV files with the specified format:
 - [mo]_[dd]_[year]_Mapping_Population_R1.csv    for biological replicate 1
 - [mo]_[dd]_[year]_Mapping_Population_R2.csv    for biological replicate 2
 
-The idea is to feed these datasheets directly into the Blackbird.
+This will create randomized labels files that directly feed into the Blackbird. Defaults to two biological replicates each with three technical replicates. 
 
 Written by Michele Wiseman of Oregon State University
 April 13, 2023
