@@ -25,7 +25,7 @@ python3 ../classification/run.py      \
             --scheduler                                  \
             --optim_type Adadelta                        \
             --lr 0.0001                                  \
-            --weight_decay 0.02                          \
+            --weight_decay 2e-4                          \
             --scheduler                                  \
             --bsize 16                                   \
             --means 0.49 0.58 0.33                       \
@@ -49,7 +49,7 @@ python3 ../classification/run.py      \
             --optim_type SGD                             \
             --outdim 2                                   \
             --lr 0.0001                                  \
-            --weight_decay 0.002                         \
+            --weight_decay 2e-4                          \
             --scheduler                                  \
             --means 0.49 0.58 0.33                       \
             --stds 0.15 0.15 0.19                        \
@@ -72,7 +72,7 @@ python3 ../classification/run.py      \
           --total_epochs 100                           \
           --optim_type Adadelta                        \
           --lr 0.0001                                  \
-          --weight_decay 0.002                         \
+          --weight_decay 2e-4                          \
           --outdim 2                                   \
           --scheduler                                  \
           --means 0.49 0.58 0.33                       \
