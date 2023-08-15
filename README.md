@@ -30,6 +30,8 @@ Overview of the training and inference process: <br>
 Package Requirements: 
 torch torchvision tensorboard termcolor optuna pandas captum matplotlib pandas pillow scikit-learn glob2 optuna h5py hashlib opencv-python  
 
+![overview part 2](https://github.com/mswiseman/mildewVision/blob/main/aps2023_visuals/overview.png)
+
 ## Classification Training
 To train your own model, you need:
 
