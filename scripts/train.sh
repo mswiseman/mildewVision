@@ -11,74 +11,77 @@ do
 
 
 # Inception3 training
-    PYTORCH_ENABLE_MPS_FALLBACK=1 python3 ../classification/run.py      \
+python3 ../classification/run.py      \
             --root_path  /Users/michelewiseman/Desktop/blackbird_ml \
-            --model_type Inception3                       \
+            --model_type Inception3                      \
             --save_model                                 \
             --pretrained                                 \
             --weighted_loss                              \
-            --mps                                        \
+            --cuda_device 0                              \
+            --cuda                                       \
             --loading_epoch 0                            \
-            --total_epochs 10                            \
+            --total_epochs 100                           \
             --outdim 2                                   \
             --scheduler                                  \
             --optim_type Adadelta                        \
-            --lr 0.008776257449598472                    \
-            --weight_decay 0.03718147978740478           \
+            --lr 0.0001                                  \
+            --weight_decay 0.02                          \
             --scheduler                                  \
             --bsize 16                                   \
             --means 0.49 0.58 0.33                       \
             --stds 0.15 0.15 0.19                        \
             --nworker 2                                  \
-            --seg_idx $i                                \
-            --test_date Jul_24_2023                     \
+            --seg_idx $i                                 \
+            --test_date Jul_24_2023                      \
             --cross_validation
 
 # ResNet training
-    PYTORCH_ENABLE_MPS_FALLBACK=1 python3 ../classification/run.py      \
+python3 ../classification/run.py      \
             --root_path  /Users/michelewiseman/Desktop/blackbird_ml \
             --model_type ResNet                          \
             --save_model                                 \
             --pretrained                                 \
             --weighted_loss                              \
-            --mps                                        \
+            --cuda_device 0                              \
+            --cuda                                       \
             --loading_epoch 0                            \
-            --total_epochs 10                            \
+            --total_epochs 100                           \
             --optim_type SGD                             \
-            --outdim 2                                  \
-            --lr 0.006690                                \
-            --weight_decay 0.001340                      \
+            --outdim 2                                   \
+            --lr 0.0001                                  \
+            --weight_decay 0.002                         \
             --scheduler                                  \
             --means 0.49 0.58 0.33                       \
             --stds 0.15 0.15 0.19                        \
             --bsize 16                                   \
             --nworker 2                                  \
-            --seg_idx $i                                \
-            --test_date Jul_24_2023                     \
+            --seg_idx $i                                 \
+            --test_date Jul_24_2023                      \
             --cross_validation
 
-  # VGG training
-    PYTORCH_ENABLE_MPS_FALLBACK=1 python3 ../classification/run.py      \
-              --root_path  /Users/michelewiseman/Desktop/blackbird_ml \
-              --model_type VGG                             \
-              --save_model                                 \
-              --pretrained                                 \
-              --weighted_loss                              \
-              --mps                                        \
-              --loading_epoch 0                            \
-              --total_epochs 10                            \
-              --optim_type Adadelta                        \
-              --lr 0.004409                                \
-              --weight_decay 0.031528                      \
-              --outdim 2                                   \
-              --scheduler                                  \
-              --means 0.49 0.58 0.33                       \
-              --stds 0.15 0.15 0.19                        \
-              --bsize 16                                   \
-              --seg_idx $i                                 \
-              --test_date Jul_24_2023                      \
-              --cross_validation                           \
-              --nworker 2
+ # VGG training
+ python3 ../classification/run.py      \
+          --root_path  /Users/michelewiseman/Desktop/blackbird_ml \
+          --model_type VGG                             \
+          --save_model                                 \
+          --pretrained                                 \
+          --weighted_loss                              \
+          --cuda_device 0                              \
+          --cuda                                       \
+          --loading_epoch 0                            \
+          --total_epochs 100                           \
+          --optim_type Adadelta                        \
+          --lr 0.0001                                  \
+          --weight_decay 0.002                         \
+          --outdim 2                                   \
+          --scheduler                                  \
+          --means 0.49 0.58 0.33                       \
+          --stds 0.15 0.15 0.19                        \
+          --bsize 16                                   \
+          --seg_idx $i                                 \
+          --test_date Jul_24_2023                      \
+          --cross_validation                           \
+          --nworker 2
 
 done
 
@@ -215,11 +218,14 @@ done
 #        processes will be used to load the data in parallel. Too few workers may slow down the data loading process, while too many workers may cause 
 #        the system to become overwhelmed and lead to performance degradation. The optimal number of workers can depend on various factors, such as the 
 #        available memory, the number of GPU/CPU cores, and the size of the batches (--bsize) being loaded.
-#    - GPU in 309: NVIDIA Quadro RTX 5000 has 3072 CUDA cores for parallel computing
-#    - CPU in 309: has 32 cores
-#    - RAM in 309: 64 gb for cpu and 16 gb for GPU
 
 #--cuda_device
 #    - The ID of your CUDA-enabled GPU (if using one) in case you have more than one
 #    - Default is 0
 #    - To determine, run: `device = torch.device("cuda" if torch.cuda.is_available() else "cpu")`
+#
+#--means
+#    - mean r g b values for you training set
+#
+#--stds 
+#    - std dev of your r g b values for your training set 
