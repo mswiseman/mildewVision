@@ -69,7 +69,7 @@ parser.add_argument('--seg_dataset', action='store_true', help='use randomized d
 parser.add_argument('--aug_dataset', action='store_true', help='use augmented dataset')
 parser.add_argument('--cross_validation', action='store_true', help='use cross validation dataset')
 
-# Fortuna
+# Optuna
 parser.add_argument('--n_trials', type=int, default=25, help='trials for fortuna')
 parser.add_argument('--study_name', type=str, default='DownyTrial', help='name of study for fortuna')
 
