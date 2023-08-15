@@ -38,9 +38,9 @@ To train your own model, you need:
    - you can label these image patches in a given directory by adding a suffix to the filename using ./preprocessing/[rename_files.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/rename_files.py)
    - you can then make train/test/val hdf5 files using ./preprocessing/[images_to_test_train_hdf5.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/images_to_test_train_hdf5.py)
 
-2. determine mean r/g/b values of your test/train/val sets using .preprocessing/[get_mean_std.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/get_mean_std.py) and plug those into your ./script/train.sh script
+2. determine mean r/g/b values of your test/train/val sets using .preprocessing/[get_mean_std.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/get_mean_std.py) and plug those into your ./script/[train.sh]() script under `--means` and `--stds` (super important...this dramatically effects your model performance). 
 
-3. Customize other training parameters such as the model, learning rate, etc. See the argparse section in ./classification/run.py to see full list of customizable variables. If you use the defualt settings I've uploaded, then your training will likely be poor as these are the optimal settings for my particular models. Reading through the available options will help you train a better baseline (as will using [Optuna](https://optuna.org/) hyperparameter engineering). 
+3. Customize other training parameters such as the model, learning rate, etc. See the argparse section in ./classification/run.py to see full list of customizable variables. You can start with the default values, but your model will perform much better if you try different base models and find the optimal hyperparamters (e.g. by using [Optuna](https://optuna.org/) hyperparameter engineering). 
 
 ## Segmentation Training
 Coming soon...
