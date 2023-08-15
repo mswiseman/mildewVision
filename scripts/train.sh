@@ -137,7 +137,7 @@ done
 #        The purpose of weighting the loss is to give more importance to certain errors or to penalize certain mistakes more than others, in order to 
 #        better optimize the model to fit the desired target. The weights are specified as coefficients in the loss function, with larger weights given 
 #        to the errors that the user wants to correct more urgently.
-#    - Default if called is 1:3, but can customize in optimizer.py
+#    - Default if called is 1:3, but can customize in optimizer.py. 1:3 gives more weight to errors with classification of the infected class. 
 
 #--resume
 #    - To resume training on a pretrained model (often for fine tuning or if training was interupted). 
@@ -148,9 +148,6 @@ done
 #--save_model
 #    - This flag saves your training model 
 #    - You can customize when you save a model and how (e.g. file format and location) in run.py
-
-#--seg_dataset
-#    - Flag to use a randomized dataset
 
 #--seg_idx
 #    - The segmentation index to be used in the cross-validation of the deep learning training script
