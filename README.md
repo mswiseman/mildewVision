@@ -25,24 +25,24 @@ Overview of the training and inference process: <br>
 # Implementation
 *conda env coming soon...*
 
-[CUDA](https://developer.nvidia.com/cuda-toolkit) is required for GPU usage; currently it's only available for PCs. Please check your GPU to figure out which version you need. If running on Apple Silicon, [MPS](https://developer.apple.com/metal/pytorch/) is necessary to take advantage of accelerated Pytorch. 
+[CUDA](https://developer.nvidia.com/cuda-toolkit) is required for GPU usage; currently it's only available for PCs. Please check your GPU to figure out which version you need. If running on Apple Silicon, [MPS](https://developer.apple.com/metal/pytorch/) is necessary to take advantage of accelerated Pytorch. <br>
 
-Package Requirements: 
+**Package Requirements**: <br>
 torch torchvision tensorboard termcolor optuna pandas captum matplotlib pandas pillow scikit-learn glob2 optuna h5py hashlib opencv-python  
 
 ![overview part 2](https://github.com/mswiseman/mildewVision/blob/main/aps2023_visuals/overview.png)
 
 ## Classification Training
-To train your own model, you need:
+To train your own model, you need:<br>
 
 1. image patches to make train/test/val .hdf5 files
    - you can make image patches using .preprocessing/[makePatches.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/make_patches.py). It's easiest to sort these patches into different directories according to the label (e.g. if it has a dog in it, put it in the dog directory)
    - you can label these image patches in a given directory by adding a suffix to the filename using ./preprocessing/[rename_files.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/rename_files.py)
    - you can then make train/test/val hdf5 files using ./preprocessing/[images_to_test_train_hdf5.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/images_to_test_train_hdf5.py)
 
-2. determine mean r/g/b values of your test/train/val sets using .preprocessing/[get_mean_std.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/get_mean_std.py) and plug those into your ./script/[train.sh]() script under `--means` and `--stds` (super important...this dramatically effects your model performance). 
+2. determine mean r/g/b values of your test/train/val sets using .preprocessing/[get_mean_std.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/get_mean_std.py) and plug those into your ./script/[train.sh](https://github.com/mswiseman/mildewVision/blob/main/scripts/train.sh) script under `--means` and `--stds` (super important...this dramatically effects your model performance). 
 
-3. Customize other training parameters such as the model, learning rate, etc. See the argparse section in ./classification/run.py to see full list of customizable variables. You can start with the default values, but your model will perform much better if you try different base models and find the optimal hyperparamters (e.g. by using [Optuna](https://optuna.org/) hyperparameter engineering). 
+3. Customize other training parameters such as the model, learning rate, etc. within the ./script/[train.sh](https://github.com/mswiseman/mildewVision/blob/main/scripts/train.sh) script. See the argparse section in ./classification/run.py to see full list of customizable variables. You can start with the default values, but your model will perform much better if you try different base models and find the optimal hyperparamters (e.g. by using [Optuna](https://optuna.org/) hyperparameter engineering). 
 
 ## Segmentation Training
 Coming soon...
