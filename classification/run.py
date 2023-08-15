@@ -200,21 +200,11 @@ printArgs(logger, {'batch_size': bsize})
 
 # Preprocessing transforms: data augmentation
 
-#means = [123./255., 150./255., 86./255.] #pm
-#stds = [34./255., 34./255., 45./255.] #pm
-
-#means = [147./255., 164./255., 117./255.] #dm
-#stds = [39./255., 39./255., 49./255.] #dm
-
 means = opt.means
 stds = opt.stds
 
 if opt.seg_dataset:
-    # means = [123./255., 150./255., 86./255.] #pm
-    # stds = [34./255., 34./255., 45./255.] #pm
-
-    #means = [147. / 255., 164. / 255., 117. / 255.]  # dm
-    #stds = [39. / 255., 39. / 255., 49. / 255.]  # dm
+  
     mean = opt.means
     stds = opt.stds
 
