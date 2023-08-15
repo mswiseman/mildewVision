@@ -1,5 +1,5 @@
 # Preface
-Many scripts in this repository build off of [Tian Qiu's original repository](https://github.com/suptimq/Saliency_based_Grape_PM_Quantification) (used for [this paper](https://academic.oup.com/hr/article/doi/10.1093/hr/uhac187/6675613)). 
+The Blackbird is a highthroughput phenomics imaging platform developed through collaboration of scientists and engineers at [Cornell AgriTech](https://cals.cornell.edu/cornell-agritech), the USDA, and [PrinterSys](https://printersys.com/). Many scripts in this repository build off of [Tian Qiu's original repository](https://github.com/suptimq/Saliency_based_Grape_PM_Quantification) (used for [this paper](https://academic.oup.com/hr/article/doi/10.1093/hr/uhac187/6675613)). 
 
 If you came here from Plant Health 2023 to familiarize yourself with computer vision, I suggest you start by checking out some simpler examples of computer vision implementation as these models and the associated code is quite complex. The company Roboflow (unaffilated) has some really awesome tutorials on getting started with computer vision, so I encourage you to check them out and work through the examples with them: 
 
@@ -28,7 +28,7 @@ Overview of the training and inference process: <br>
 [CUDA](https://developer.nvidia.com/cuda-toolkit) is required for GPU usage; currently it's only available for PCs. Please check your GPU to figure out which version you need. If running on Apple Silicon, [MPS](https://developer.apple.com/metal/pytorch/) is necessary to take advantage of accelerated Pytorch. <br>
 
 **Package Requirements**: <br>
-torch torchvision tensorboard termcolor optuna pandas captum matplotlib pandas pillow scikit-learn glob2 optuna h5py hashlib opencv-python  
+torch torchvision tensorboard termcolor optuna pandas captum matplotlib pandas pillow scikit-learn glob2 optuna h5py hashlib opencv-python <br><br>If running on google colab (recommended), just run: `!pip install optuna==3.1.0 termcolor pandas scikit-learn==1.0.2 numba==0.56.4 captum` as the other packages should already be installed.  
 
 ![overview part 2](https://github.com/mswiseman/mildewVision/blob/main/aps2023_visuals/overview.png)
 
