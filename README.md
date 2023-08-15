@@ -36,9 +36,9 @@ torch torchvision tensorboard termcolor optuna pandas captum matplotlib pandas p
 To train your own model, you need:<br>
 
 1. image patches to make train/test/val .hdf5 files
-   - you can make image patches using .preprocessing/[makePatches.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/make_patches.py). It's easiest to sort these patches into different directories according to the label (e.g. if it has a dog in it, put it in the dog directory)
+   - you can make image patches using [.preprocessing/makePatches.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/make_patches.py). It's easiest to sort these patches into different directories according to the label (e.g. if it has a dog in it, put it in the dog directory)
    - you can label these image patches in a given directory by adding a suffix to the filename using [./preprocessing/rename_files.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/rename_files.py)
-   - you can then make train/test/val hdf5 files using ./preprocessing/[images_to_test_train_hdf5.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/images_to_test_train_hdf5.py)
+   - you can then make train/test/val hdf5 files using [./preprocessing/images_to_test_train_hdf5.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/images_to_test_train_hdf5.py)
 
 2. determine mean r/g/b values of your test/train/val sets using [.preprocessing/get_mean_std.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/get_mean_std.py) and plug those into your [./script/train.sh](https://github.com/mswiseman/mildewVision/blob/main/scripts/train.sh) script under `--means` and `--stds` (super important...this dramatically effects your model performance). 
 
