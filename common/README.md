@@ -6,5 +6,5 @@ You can use this scrpt to change the name of a directory of files to [index_numb
 2. [**rename_by_csv.py**](https://github.com/mswiseman/mildewVision/blob/main/common/rename_by_csv.py) <br>
 Rename a list of files using a csv.<br>
 
-3. [**remove_zeros.sh**](https://github.com/mswiseman/mildewVision/blob/main/common/remove_zeros.sh) <b>
+3. [**remove_zeros.sh**](https://github.com/mswiseman/mildewVision/blob/main/common/remove_zeros.sh) <br>
 This script removes the leading zeros in a file name e.g. 001-image.png to 1-image.png. Be sure to run test before running on entire directories. 
