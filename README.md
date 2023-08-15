@@ -7,7 +7,7 @@ If you came here from Plant Health 2023 to familiarize yourself with computer vi
 * [Instance Segmentaton](https://www.youtube.com/watch?v=pFiGSrRtaU4&t=606s)<br>
 * [Classification](https://www.youtube.com/watch?v=93kXzUOiYY4)<br>
 
-This repo is still in progress, feel free to email me with any questions or clarifications: [wisemami@oregonstate.edu](mailto:wisemami@oregonstate.edu) 
+This repo is still in progress as I'm still actively improving our code and models; alas, feel free to email me with any questions or clarifications: [wisemami@oregonstate.edu](mailto:wisemami@oregonstate.edu) 
 
 
 # Introduction
