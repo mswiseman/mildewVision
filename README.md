@@ -42,7 +42,8 @@ To train your own model, you need:<br>
 
 2. determine mean r/g/b values of your test/train/val sets using [.preprocessing/get_mean_std.py](https://github.com/mswiseman/mildewVision/blob/main/preprocessing/get_mean_std.py) and plug those into your [./script/train.sh](https://github.com/mswiseman/mildewVision/blob/main/scripts/train.sh) script under `--means` and `--stds` (super important...this dramatically effects your model performance). 
 
-3. Customize other training parameters such as the model, learning rate, etc. within the [./script/train.sh](https://github.com/mswiseman/mildewVision/blob/main/scripts/train.sh) script. See the argparse section in [./classification/run.py](https://github.com/mswiseman/mildewVision/blob/main/classification/run.py) to see full list of customizable variables. You can start with the default values, but your model will perform much better if you try different base models and find the optimal hyperparamters (e.g. by using [Optuna](https://optuna.org/) hyperparameter engineering). 
+3. Customize other training parameters such as the model, learning rate, etc. within the [./script/train.sh](https://github.com/mswiseman/mildewVision/blob/main/scripts/train.sh) script. See the argparse section in [./classification/run.py](https://github.com/mswiseman/mildewVision/blob/main/classification/run.py) to see full list of customizable variables. <br> **Note: You can start with the default values, but your model will perform much better if you try different base models and find the optimal hyperparamters (e.g. by using [Optuna](https://optuna.org/) hyperparameter engineering as shown below).**
+![optuna](https://github.com/mswiseman/mildewVision/blob/main/aps2023_visuals/optuna.png)
 
 ## Segmentation Training
 Coming soon...
