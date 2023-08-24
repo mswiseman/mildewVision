@@ -33,8 +33,8 @@ from sanity_check.utils import get_saliency_methods, get_saliency_masks
 np.random.seed(2020)
 
 """ Usage
-Analyze the full-size leaf disc images, calculate the patch severity rate, number of patches per class, and save saliency maps for the saliency methods set to true.
-Given a date, does analysis on all the data collected in that date.
+Analyze the full-size leaf disc images and calculate the severity rate
+Given a date, do analysis on all the data collected in that date
 """
 
 parser = argparse.ArgumentParser()
@@ -125,6 +125,7 @@ model.eval()
 last_conv_layer = get_last_conv_layer(model)
 first_conv_layer = get_first_conv_layer(model)
 
+# For image normalization
 means = opt.means
 stds = opt.stds
 
@@ -145,7 +146,7 @@ else:
     ])
     image_width = image_height = 224
 
-# Captum
+# Captum - alter saliency methods True/False as desired
 saliency_methods = get_saliency_methods(model,
                                         last_conv_layer=last_conv_layer,
                                         first_conv_layer=first_conv_layer,
@@ -154,11 +155,11 @@ saliency_methods = get_saliency_methods(model,
                                         transform=preprocess,
                                         device=device,
                                         partial=True,
-                                        explanation_map=False,
-                                        gradcam=False,
+                                        explanation_map=True,
+                                        gradcam=True,
                                         gradient=True,
-                                        smooth_grad=False,
-                                        deeplift=False)
+                                        smooth_grad=True,
+                                        deeplift=True)
 
 # Write severity ratio as CSV files
 key = [f'{x}_sr2' for x in saliency_methods.keys()]
@@ -200,6 +201,7 @@ for trays in tray:
         # Get info of resized image subim_x: number of patches one row
         img = Image.open(img_filepath)
         img_arr = np.asarray(img)
+        imagename_text = os.path.splitext(leaf_disk_image_filename)[0]
         width, height = img.size
 
         subim_x = (width - IMG_WIDTH) // step_size + 1
@@ -208,8 +210,6 @@ for trays in tray:
         subim_width = (subim_x - 1) * step_size + IMG_WIDTH
         sub_img = img.crop((0, 0, subim_width, subim_height))
         sub_img_arr = np.asarray(sub_img)
-
-        imagename_text = os.path.splitext(leaf_disk_image_filename)[0]
 
         # Masking
         imask = leaf_mask(img, rel_th=rel_th)
@@ -221,8 +221,8 @@ for trays in tray:
         t1 = time.time()
         logger.info('Finished loading mask: {}'.format(timeSince(start_time)))
 
+        # Set all variables to zero at start
         patch_idx = coor_x = coor_y = 0
-        # Lost focused subimg
         infected_patch = conidiophores_patch = clear_patch = discard_patch = lost_focus_patch = total_patch = 0
         infected_pixel = conidiophores_pixel = clear_pixel = discard_pixel = lost_focus_pixel = total_pixel = 0
 
@@ -276,10 +276,7 @@ for trays in tray:
                     prob_attrs1[patch_idx] = prob[0][1].cpu().detach().item()  # Probability of class 1
                     if outdim == 3:
                         prob_value2 = prob[0][2].cpu().detach().item()  # Probability of class 2
-                        prob_attrs2[patch_idx] = prob[0][2].cpu().detach().item()  # Probability of class 2
-
-                    # Store the original logits class
-                    original_logits_class = logits_class
+                        prob_attrs2[patch_idx] = prob[0][2].cpu().detach().item()  
 
                     if outdim == 3:
                         for saliency_class in [1, 2]:
@@ -359,7 +356,7 @@ for trays in tray:
                             saved_patch_filepath = output_leaf_disk_image_folder_saliency / f'{imagename_text}_image_patch_{patch_idx}_conidiophores.{format_}'
                             plt.imsave(saved_patch_filepath, subim_arr, cmap=default_cmap, format=format_, dpi=300)
 
-                    # This logic prioritizes conidiophores over hyphae
+                    # Increment the number of conidiphore, hyphal, or clear patches; discard rest
                     if outdim == 3 and prob_value2 >= up_th:
                         conidiophores_patch += 1
                     elif prob_value >= up_th:
@@ -433,6 +430,7 @@ for trays in tray:
             heatmap_info['prob_heatmap2'] = prob_heatmap2
 
         # Calculate severity rate
+        # print(f"Value of outdim: {outdim}")
         if outdim == 3:
             severity_rate_patch, pixels_patch = patch_sr.metric_two_class(
                 patch_info, heatmap_info, threshold_info)
@@ -448,8 +446,8 @@ for trays in tray:
         conidiophores_patch = patch_info['conidiophores_patch']
         clear_patch = patch_info['clear_patch']
 
-        # Visualization
-        alpha = 0.7
+        # Adjust for transparancy
+        alpha = 0.7 
 
         # Raw leaf disk
         output_leaf_disk_image_filepath = output_leaf_disk_image_folder / \
@@ -463,7 +461,6 @@ for trays in tray:
         # Masked leaf disk
         output_leaf_disk_image_filepath = output_leaf_disk_image_folder / \
                                           f'{opt.dpi}_{f}_masked.{format_}'
-
         sub_img_arr_copy = img_arr.copy()
         sub_img_arr_copy[imask == 0] = 0
         sub_img_arr_copy = sub_img_arr_copy.astype('uint8') / 255
@@ -479,12 +476,14 @@ for trays in tray:
         value[value < up_th] = 0
         value[value >= up_th] = 1
         value = value.astype('uint8')
+
         # Count patches with value = 0 and value = 1
         count_0 = np.sum(value == 0) / (224 * 224)
         count_1 = np.sum(value == 1) / (224 * 224)
         alphas = np.full(imask.shape, alpha)
         alphas[value == 0] = 0
         plt.imshow(value, alpha=alphas, cmap=default_cmap)
+
         # Display counts on the figure
         plt.text(100, 370, f'Healthy Patches: {clear_patch}', color='white', fontsize=10)
         plt.text(100, 710, f'Hyphal Patches: {infected_patch}', color='white', fontsize=10)
@@ -565,14 +564,14 @@ for trays in tray:
             # print("record_data: ", record_data)
             record_df = pd.DataFrame([record_data], columns=META_COL_NAMES)
 
-            severity_rate_df_list[i] = severity_rate_df_list[i].append(record_df, ignore_index=True)
+            severity_rate_df_list[i] = pd.concat([severity_rate_df_list[i], record_df], ignore_index=True)
 
             output_csv_folder_th = output_folder / f'th'
             if not os.path.exists(output_csv_folder_th):
                 os.makedirs(output_csv_folder_th, exist_ok=True)
 
             output_csv_filepath = output_csv_folder_th / 'severity_rate.csv'
-            print("output_csv_filepath: ", output_csv_filepath)
+            # print("output_csv_filepath: ", output_csv_filepath)
 
             severity_rate_df_list[i].to_csv(output_csv_filepath, index=False)
             logger.info('Saved {}'.format(output_csv_filepath))
