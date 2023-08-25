@@ -10,26 +10,27 @@
 #for((i=0;i<4;i++))
 #do
     #tray=${trays[i]}
-    time python3 ../plot_sal_map_leaf.py \
-                --model_type ResNet                                    \
-                --model_path /Users/michelewiseman/Desktop/blackbird_ml        \
-                --dataset_path /Users/michelewiseman/Desktop/blackbird_ml/data                  \
-                --pretrained                                               \
-                --loading_epoch 95                                         \
-                --cuda                                                     \
-                --cuda_id 0                                                \
-                --img_folder 6-28-2023_6dpi                                \
-                --up_threshold 0.7                                         \
-                --down_threshold 0.3                                       \
-                --outdim 2                                                 \
-                --dpi 6                                                    \
-                --threshold 0.2                                            \
-                --trays 1                                                  \
-                --means 0.49 0.58 0.33                                    \
-                --stds 0.15 0.15 0.19                                     \
+    time python ../plot_sal_map_leaf.py                                       \
+                --model_type ResNet                                           \
+                --model_path /c/Users/Intel\ User/Desktop/blackbird_scripts   \
+                --dataset_path /e/Stacked/Aug_2_22_V6/                        \
+                --pretrained                                                  \
+                --loading_epoch 16                                            \
+                --cuda                                                        \
+                --cuda_id 0                                                   \
+                --img_folder 8-8-2022_6dpi                                    \
+                --up_threshold 0.8                                            \
+                --down_threshold 0.2                                          \
+                --threshold 0.2                                               \
+                --outdim 3                                                    \
+                --dpi 6                                                       \
+                --trays 1                                                     \
+                --means 0.49 0.5975 0.34                                      \
+                --stds 0.14 0.14 0.18                                         \
                 --timestamp Jul24_16-44-43_2023
-                #--save_healthy                                             \
-                #--save_infected
+                #--save_infected                                             
+                #--save_healthy                                              
+                #--save_conidiophores
 
 #done
 
