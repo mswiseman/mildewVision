@@ -7,4 +7,7 @@ You can use this scrpt to change the name of a directory of files to [index_numb
 Rename a list of files using a csv.<br>
 
 3. [**remove_zeros.sh**](https://github.com/mswiseman/mildewVision/blob/main/common/remove_zeros.sh) <br>
-This script removes the leading zeros in a file name e.g. 001-image.png to 1-image.png. Be sure to run test before running on entire directories. 
+This script removes the leading zeros in a file name e.g. 001-image.png to 1-image.png. Be sure to run test before running on entire directories.
+
+4. [**generate_bash_scripts.py**](https://github.com/mswiseman/mildewVision/blob/main/common/generate_bash_scripts.py) <br>
+This script goes through all your subdirectories and populates the required information (e.g. image date, dpi, tray #s, etc.) into your bash scripts. 
