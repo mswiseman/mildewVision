@@ -1,7 +1,7 @@
 # Preface
 The Blackbird is a highthroughput phenomics imaging platform developed through collaboration of scientists and engineers at [Cornell AgriTech](https://cals.cornell.edu/cornell-agritech), the USDA, and [PrinterSys](https://printersys.com/). Many scripts in this repository build off of [Tian Qiu's original repository](https://github.com/suptimq/Saliency_based_Grape_PM_Quantification) (used for [this paper](https://academic.oup.com/hr/article/doi/10.1093/hr/uhac187/6675613)). 
 
-If you came here from Plant Health 2023 to familiarize yourself with computer vision, I suggest you start by checking out some simpler examples of computer vision implementation as these models and the associated code is quite complex. The company Roboflow (unaffilated) has some really awesome tutorials on getting started with computer vision, so I encourage you to check them out and work through the examples with them: 
+If you came here from Plant Health or Plant Bio to familiarize yourself with computer vision, I suggest you start by checking out some simpler examples of computer vision implementation as these models and the associated code is quite complex. The company Roboflow (unaffilated) has some really awesome tutorials on getting started with computer vision, so I encourage you to check them out and work through the examples with them: 
 
 * [Object detection](https://www.youtube.com/watch?v=wuZtUMEiKWY)<br>
 * [Instance Segmentaton](https://www.youtube.com/watch?v=pFiGSrRtaU4&t=606s)<br>
