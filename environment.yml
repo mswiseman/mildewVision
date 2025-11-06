@@ -1,0 +1,31 @@
+name: mildewVision
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+
+dependencies:
+  - python=3.10
+  - numpy>=1.24
+  - pandas>=2.0
+  - pillow>=9.0
+  - matplotlib>=3.6
+  - seaborn>=0.12
+  - h5py>=3.8
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8
+  - scikit-learn
+  - captum>=0.6
+  - termcolor
+  - tensorboard
+  - urllib3
+  - requests
+  - pip
+
+  - pip:
+      - opencv-python
+      - tqdm
+      - glob2           
+      - optuna>=3.0
