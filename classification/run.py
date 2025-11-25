@@ -12,10 +12,10 @@ import argparse
 import numpy as np
 from pathlib import Path
 from termcolor import colored
+from datetime import datetime
 
 import torch
 import torchvision.transforms as tvtrans
-import tensorboard
 
 from utils import (getTimestamp, getHostName, makeSubdir,
                    logInfoWithDot, printArgs, set_logging)
@@ -38,10 +38,12 @@ parser.add_argument('--outdim', type=int, default=2, help='number of classes')
 parser.add_argument('--save_model', action='store_true', help='save model')
 parser.add_argument('--cuda', action='store_true', help='enable cuda')
 parser.add_argument('--mps', action='store_true', help='enable mps')
-parser.add_argument('--means', type=float, nargs='+', default="0.504 0.604 0.361",
+parser.add_argument('--means', type=float, nargs='+', default=[0.504, 0.604, 0.361],
                     help='List of means for each channel')
-parser.add_argument('--stds', type=float, nargs='+', default="0.144 0.142 0.192",
+parser.add_argument('--stds', type=float, nargs='+', default=[0.144, 0.142, 0.192],
                     help='List of standard deviations for each channel')
+parser.add_argument('--patience', type=int, default=15, help='early stopping patience')
+
 
 
 # Optimizer
@@ -49,6 +51,9 @@ parser.add_argument('--optim_type', default='Adam', help='optimizer used for tra
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate for optimzer')
 parser.add_argument('--weight_decay', type=float, default=0.01, help='weight decay for optimizer')
 parser.add_argument('--weighted_loss', action='store_true', help='weighted loss')
+parser.add_argument('--max_grad_norm', type=float, default=None,
+                    help='Clip gradients to this L2 norm (None to disable)')
+parser.add_argument('--label_smoothing', type=float, default=0.0)
 
 # Scheduler
 parser.add_argument('--scheduler', action='store_true', help='use scheduler')
@@ -62,6 +67,8 @@ parser.add_argument('--manual_seed', type=int, default=1701, help='reproduce exp
 parser.add_argument('--cuda_device', default="0", help='ith cuda used for training')
 parser.add_argument('--root_path', type=str, required=True, help='path to data')
 parser.add_argument('--test_date', type=str, help='date to be tested')
+parser.add_argument('--test_hdf5', type=str, default="test.hdf5", help='test hdf5 file')
+parser.add_argument('--train_hdf5', type=str, default="train.hdf5", help='train hdf5 file')
 parser.add_argument('--qtl_partition_idx', type=str, help='qtl partition to be used')
 parser.add_argument('--seg_idx', type=str, help='segmentation index to be used in the cross-validation of the deep learning training script')
 parser.add_argument('--demo_dataset', action='store_true', help='use balanced dataset')
@@ -69,7 +76,7 @@ parser.add_argument('--seg_dataset', action='store_true', help='use randomized d
 parser.add_argument('--aug_dataset', action='store_true', help='use augmented dataset')
 parser.add_argument('--cross_validation', action='store_true', help='use cross validation dataset')
 
-# Optuna
+# Fortuna
 parser.add_argument('--n_trials', type=int, default=25, help='trials for fortuna')
 parser.add_argument('--study_name', type=str, default='DownyTrial', help='name of study for fortuna')
 
@@ -78,35 +85,41 @@ opt = parser.parse_args()
 
 np.random.seed(opt.manual_seed)
 torch.manual_seed(opt.manual_seed)
-torch.cuda.manual_seed(opt.manual_seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(opt.manual_seed)
 
-if opt.mps:
-    device_type = "mps"
-elif opt.cuda:
-    device_type = "cuda"
+if opt.cuda:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(opt.cuda_device)
+    assert torch.cuda.is_available(), "CUDA requested but not available."
+    gpu = torch.device("cuda")
+elif opt.mps:
+    assert torch.backends.mps.is_available(), "MPS requested but not available."
+    gpu = torch.device("mps")
 else:
-    device_type = "cpu"
-
-gpu = torch.device(device_type)
+    gpu = torch.device("cpu")
 
 # Basic configuration
 root_path = Path(opt.root_path)
 result_root_path = root_path / 'results'
 dataset_root_path = root_path / 'data'
+test_hdf5_filename = opt.test_hdf5
+train_hdf5_filename = opt.train_hdf5
 
 if opt.demo_dataset:
     meta_filepath = 'metadata.csv'
     train_filepath = 'demo_train_set.hdf5'
     test_filepath = 'demo_val_set.hdf5'
     group = 'demo'
+    
 elif opt.aug_dataset:
     meta_filepath = 'metadata.csv'
     train_filepath = 'train_set_aug.hdf5'
     test_filepath = 'test_set_aug.hdf5'
+    group = 'aug'                
 else:
     meta_filepath = 'metadata.csv'
-    train_filepath = 'train.hdf5'
-    test_filepath = 'test.hdf5'
+    train_filepath = opt.train_hdf5
+    test_filepath = opt.test_hdf5
     group = 'asabe_journal'
 
 if opt.cross_validation:
@@ -127,7 +140,8 @@ bsize = opt.bsize
 nworker = opt.nworker
 
 # Model file format and location configuration
-year = '2023' # this is for labeling the model
+#year = '2024' # this is for labeling the model
+year = str(datetime.now().year)  # Convert to string for formatting (remove above line if this works)
 current_time = getTimestamp() if not opt.resume else opt.resume_timestamp
 model_type_time = opt.model_type + '_{0}_{1}'.format(current_time, year)
 model_path = result_root_path / 'models' / model_type_time
@@ -159,8 +173,10 @@ model = {
     'total_epochs': opt.total_epochs,
     'model_path': model_path,
     'model_filename': model_filename,
+    'patience': opt.patience,
     'save': opt.save_model,
-    'gpu': gpu,
+    'gpu': opt.cuda,   # bool: user wants CUDA
+    'mps': opt.mps,    # bool: user wants MPS
     'feature_extract': opt.feature_extract,
     'manual_seed': opt.manual_seed
 }
@@ -170,7 +186,10 @@ optimizer = {
     'resume': opt.resume,
     'lr': opt.lr,
     'weight_decay': opt.weight_decay,
-    'weighted_loss': opt.weighted_loss
+    'weighted_loss': opt.weighted_loss,
+    'max_grad_norm': opt.max_grad_norm,
+    'label_smoothing': opt.label_smoothing
+
 }
 
 scheduler = {
@@ -186,8 +205,6 @@ logging = {
     'log_level': 20,  # 20 == level (logging.INFO)
 }
 
-writer = {'writer_path': writer_path, 'writer_filename': writer_filename}
-
 # Log config
 makeSubdir(logging['log_path'])
 logger = set_logging(logging['log_path'] / logging['log_filename'],
@@ -199,14 +216,8 @@ printArgs(logger, vars(opt))
 printArgs(logger, {'batch_size': bsize})
 
 # Preprocessing transforms: data augmentation
-
 means = opt.means
 stds = opt.stds
-
-if opt.seg_dataset:
-  
-    mean = opt.means
-    stds = opt.stds
 
 if opt.model_type == 'Inception3':
     train_augmentation = tvtrans.Compose([
@@ -216,7 +227,7 @@ if opt.model_type == 'Inception3':
         tvtrans.RandomVerticalFlip(p=0.5),
         tvtrans.RandomAffine(degrees=(0, 180), translate=(
             0.05, 0.05), scale=(0.9, 1.1)),
-        # tvtrans.ColorJitter(brightness=[1.0, 1.3], contrast=[1.0, 1.3]),
+        tvtrans.ColorJitter(brightness=(1.0, 1.3), contrast=(1.0, 1.3)),
         tvtrans.ToTensor(),
         tvtrans.Normalize(means, stds)
     ])
@@ -234,7 +245,7 @@ else:
         tvtrans.RandomVerticalFlip(p=0.5),
         tvtrans.RandomAffine(degrees=(0, 180), translate=(
             0.05, 0.05), scale=(0.9, 1.1)),
-        # tvtrans.ColorJitter(brightness=[1.0, 1.3], contrast=[1.0, 1.3]),
+        tvtrans.ColorJitter(brightness=[1.0, 1.3], contrast=[1.0, 1.3]),
         tvtrans.ToTensor(),
         tvtrans.Normalize(means, stds)
     ])
@@ -245,8 +256,7 @@ else:
         tvtrans.Normalize(means, stds)
     ])
 
-logger.info(train_augmentation)
-
+logger.info("train augmentations:\n%s", train_augmentation)
 
 def worker_init_fn(worker_id): return np.random.seed(
     np.random.get_state()[1][0] + worker_id)
@@ -257,93 +267,159 @@ hyphal_train_ds = HyphalDataset(dataset_path,
                                 train=True,
                                 transform=train_augmentation)
 # In case batch norm layer won't work on the single sample
-drop_last = True if len(hyphal_train_ds) % bsize == 1 else False
-hyphal_train_dl = torch.utils.data.DataLoader(hyphal_train_ds,
-                                              batch_size=bsize,
-                                              drop_last=drop_last,
-                                              num_workers=nworker,
-                                              worker_init_fn=worker_init_fn,
-                                              shuffle=True)
+
+hyphal_train_dl = torch.utils.data.DataLoader(
+    hyphal_train_ds,
+    batch_size=bsize,
+    shuffle=True,
+    drop_last=True,
+    num_workers=nworker,
+    worker_init_fn=worker_init_fn,
+    pin_memory=torch.cuda.is_available(),
+    persistent_workers=(nworker > 0),
+    prefetch_factor=2, 
+)
 
 hyphal_test_ds = HyphalDataset(dataset_path,
                                train=False,
                                transform=test_transform)
-drop_last = True if len(hyphal_test_ds) % bsize == 1 else False
-hyphal_test_dl = torch.utils.data.DataLoader(hyphal_test_ds,
-                                             batch_size=bsize,
-                                             drop_last=drop_last,
-                                             num_workers=nworker,
-                                             shuffle=False)
+hyphal_test_dl = torch.utils.data.DataLoader(
+    hyphal_test_ds,
+    batch_size=bsize,
+    shuffle=False,
+    drop_last=False,
+    num_workers=nworker,
+    pin_memory=torch.cuda.is_available(),
+    persistent_workers=(nworker > 0),
+    prefetch_factor=2 if nworker > 0 else None,
+)
 
 dataloader = {'train': hyphal_train_dl, 'valid': hyphal_test_dl}
 
+writer = {'writer_path': writer_path, 'writer_filename': writer_filename}
 if __name__ == '__main__':
 
     if opt.n_trials > 0:
         # Define the pruner
-        pruner = optuna.pruners.MedianPruner(n_warmup_steps=10, interval_steps=1)
-
+        #pruner = optuna.pruners.MedianPruner(n_warmup_steps=5, interval_steps=1)
+        pruner = optuna.pruners.HyperbandPruner(
+            min_resource=5,           # grace period before pruning
+            max_resource=60,          # == total_epochs in the trial
+            reduction_factor=3)  # 2 or 3 are common
+        writer = {'writer_path': writer_path, 'writer_filename': writer_filename}
 
         def objective(trial):
-            # Define the search space for hyperparameters
-            lr = trial.suggest_float('lr', 1e-7, 1e-2)
-            weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-1)
-            optim_type = trial.suggest_categorical('optim_type', ['Adam', 'Adadelta', 'RMSprop', 'SGD'])
-
-            # Set the hyperparameters in the optimizer dictionary
-
-            optimizer['optim_type'] = optim_type
-            optimizer['lr'] = lr
-            optimizer['weight_decay'] = weight_decay
-
-            print(colored('Hyperparameters for trial {trial.number}:', 'green'), optimizer)
-
-            # Train the model using the new hyperparameters
-
-
-            solver = HyphalSolver(model, dataloader, optimizer, scheduler, logger, writer)
-            solver.forward()
-
-            # Evaluate the model and return the validation accuracy
-            return solver.evaluate()
+            # Per-trial writer
+            trial_writer_fn = f"{opt.model_type}_{current_time}_trial{trial.number}_{year}_{getHostName()}"
+            trial_writer = {'writer_path': writer_path, 'writer_filename': trial_writer_fn}
+        
+            # Suggest base hyperparams
+            optim_type = trial.suggest_categorical('optim_type', ['AdamW', 'Adadelta', 'SGD'])
+            lr = trial.suggest_float('lr', 1e-5, 3e-2, log=True)
+            label_smoothing = trial.suggest_float('label_smoothing', 0.00, 0.10, step=0.01)
+        
+            # weight_decay + optimizer-specific knobs (compute FIRST)
+            opt_extras = {}
+            if optim_type == 'SGD':
+                weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True)
+                opt_extras['momentum'] = trial.suggest_float('momentum', 0.85, 0.98)
+                opt_extras['nesterov'] = trial.suggest_categorical('nesterov', [False, True])
+        
+            elif optim_type == 'AdamW':
+                weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True)
+                opt_extras['beta1'] = trial.suggest_float('beta1', 0.85, 0.99)
+                opt_extras['beta2'] = 0.999  # keep fixed unless you want to tune it
+        
+            else:  # Adadelta
+                wd_choice = trial.suggest_categorical('wd_choice', ['zero', 'small'])
+                weight_decay = 0.0 if wd_choice == 'zero' else trial.suggest_float('weight_decay', 1e-8, 1e-4, log=True)
+                opt_extras['rho'] = trial.suggest_float('rho', 0.85, 0.99)  # optional
+        
+            # Build trial-local cfgs (don’t mutate globals)
+            trial_optimizer = dict(optimizer)
+            trial_optimizer.update({
+                'optim_type': optim_type,
+                'lr': lr,
+                'weight_decay': weight_decay,
+                'label_smoothing': label_smoothing, 
+                **opt_extras,
+            })
+            
+            print(colored(f'Hyperparameters for trial {trial.number}:', 'green'), trial_optimizer)
+        
+            trial_model = dict(model)
+            trial_model['save'] = False  # speed up trials
+        
+            # Train & eval
+            solver = None
+            try:
+                solver = HyphalSolver(trial_model, dataloader, trial_optimizer, scheduler, logger, trial_writer)
+                solver.forward()
+                val_acc = solver.evaluate()
+                # report once at epoch count for pruner
+                trial.report(val_acc, step=model['total_epochs'])
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+                return val_acc
+            finally:
+                del solver
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
 
         # Optimize hyperparameters using Optuna
-        study_name = opt.study_name
-        n_trials = opt.n_trials
-
-        storage_url = "sqlite:///db.sqlite3"
         study = optuna.create_study(direction='maximize',
-                                    study_name=study_name,
+                                    study_name=opt.study_name,
                                     pruner=pruner,
-                                    storage=storage_url,
-                                    )
-        study.optimize(objective, n_trials)
-
+                                    storage="sqlite:///db.sqlite3",
+                                    load_if_exists=True)
+        study.optimize(objective, n_trials=opt.n_trials)
+        
         # Print the best hyperparameters
         print(colored('Best hyperparameters: ', 'green'), study.best_params)
-
+        
         # Create a table of the top 5 hyperparameter combinations with their accuracy values
         trials_df = study.trials_dataframe(attrs=('number', 'value', 'params'))
         trials_df = trials_df.rename(columns={'value': 'accuracy'})
         trials_df = trials_df.sort_values(by='accuracy', ascending=False)
         top_5_trials = trials_df.head(5)
-
-        # Print the top 5 hyperparameter combinations
+        
         print("\nTop 5 hyperparameter combinations:")
         print(top_5_trials.to_string(index=False))
-
-        # Train the model with the best hyperparameters
-        optimizer['lr'] = study.best_params['lr']
-        optimizer['optim_type'] = study.best_params['optim_type']
-        optimizer['weight_decay'] = study.best_params['weight_decay']
-
-
-    # Train the model
-    solver = HyphalSolver(model, dataloader, optimizer, scheduler, logger, writer)
-    solver.forward()
-
-    # Evaluate the model and print the validation accuracy
-    accuracy = solver.evaluate()
-    print(f"Validation accuracy: {accuracy:.3f}%")
-
+        
+        # Send best params to optimizer
+        best = study.best_params
+        optimizer['optim_type'] = best['optim_type']
+        optimizer['lr'] = best['lr']
+        optimizer['label_smoothing'] = best.get('label_smoothing', optimizer.get('label_smoothing', 0.0))
+        
+        if best['optim_type'] == 'SGD':
+            optimizer['weight_decay'] = best['weight_decay']
+            optimizer['momentum'] = best['momentum']
+            optimizer['nesterov'] = best['nesterov']
+        elif best['optim_type'] == 'AdamW':
+            optimizer['weight_decay'] = best['weight_decay']
+            optimizer['beta1'] = best.get('beta1', 0.9)
+            optimizer['beta2'] = best.get('beta2', 0.999)
+        else:  # Adadelta
+            optimizer['weight_decay'] = best.get('weight_decay', 0.0)
+            if 'rho' in best:
+                optimizer['rho'] = best['rho']
+        
+        # Give the final run its own writer name
+        writer = {
+            'writer_path': writer_path,
+            'writer_filename': f"{opt.model_type}_{current_time}_best_{year}_{getHostName()}"
+        }
+        
+        # === Final training run (NO trial-specific args here) ===
+        solver = None
+        try:
+            solver = HyphalSolver(model, dataloader, optimizer, scheduler, logger, writer)
+            solver.forward()
+            accuracy = solver.evaluate()
+            print(f"Validation accuracy: {accuracy:.3f}%")
+        finally:
+            del solver
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
