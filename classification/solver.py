@@ -19,6 +19,7 @@ from termcolor import colored
 if __name__ == "__main__":
     from utils import init_model, load_model, parse_model, plot_confusion_matrix
 
+
 class Solver():
     def __init__(self, model, dataloader, optimizer, scheduler, logger, writer):
         """
@@ -37,6 +38,7 @@ class Solver():
         self.model_path = model['model_path']
         self.model_filename = model['model_filename']
         self.save = model['save']
+        self.patience = model['patience']
         self.model_name = model['model_type']
         self.model_fullpath = str(self.model_path / self.model_filename)
 
@@ -52,6 +54,11 @@ class Solver():
 
         # Logger
         self.logger = logger
+
+        # Loss
+        self.best_loss = float('inf')
+        self.patience = 50  # set your patience
+        self.patience_counter = 0
 
         # Writer: Default path is runs/CURRENT_DATETIME_HOSTNAME
         writer_fullname = writer['writer_path'] / writer['writer_filename']
@@ -78,11 +85,11 @@ class Solver():
 
         if optimizer['weighted_loss']:
             if model['outdim'] == 2:
-                weights = torch.tensor([1., 3.]).to(self.device)
+                weights = torch.tensor([1., 1.]).to(self.device)
                 self.logger.info(f'weighted {weights}')
                 self.criterion = nn.CrossEntropyLoss(weight=weights)
             if model['outdim'] == 3:
-                weights = torch.tensor([1., 3., 3.]).to(self.device)
+                weights = torch.tensor([1., 1., 1.]).to(self.device)
                 self.logger.info(f'weighted {weights}')
                 self.criterion = nn.CrossEntropyLoss(weight=weights)
         else:
@@ -129,38 +136,49 @@ class Solver():
         total_epochs = start_epoch + self.total_epochs
         for epoch in range(start_epoch, total_epochs):
 
-            np.random.seed(self.init_random_seed+epoch)
+            np.random.seed(self.init_random_seed + epoch)
 
             self.train_one_epoch(epoch)
             self.test_one_epoch(epoch)
+            val_loss = self.test_one_epoch(epoch)  # assuming this function returns validation loss
 
             if self.scheduler:
                 self.scheduler.step()
 
-            if self.save and self.is_best:
-                makeSubdir(self.model_path)
-                torch.save({
-                    'epoch': self.best_epoch,
-                    'model_state_dict': self.best_model.state_dict(),
-                    'optimizer_state_dict': self.best_optim.state_dict(),
-                    'best_acc': self.best_acc,
-                }, self.best_model_filepath)
+            if val_loss < self.best_loss:
+                self.best_loss = val_loss
+                self.patience_counter = 0  # reset counter when new best loss is found
 
-                # Print information in green color
-                print(colored("SAVED MODEL: {}".format(self.model_fullpath.format(self.model_name, self.best_epoch)),
-                              'green'))
+                # Save the best model
+                if self.save:
+                    makeSubdir(self.model_path)
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'best_loss': self.best_loss,
+                    }, self.best_model_filepath)
 
-                # Log information
-                logInfoWithDot(
-                    self.logger, "SAVED MODEL: {}".format(
-                        self.model_fullpath.format(self.model_name, self.best_epoch)))
+                    # Print information in green color
+                    print(colored("SAVED MODEL: {}".format(self.model_fullpath.format(self.model_name, epoch)),
+                                  'green'))
 
+                    # Log information
+                    logInfoWithDot(
+                        self.logger, "SAVED MODEL: {}".format(
+                            self.model_fullpath.format(self.model_name, epoch)))
+            else:
+                self.patience_counter += 1
 
-        # Rename
-        shutil.move(self.best_model_filepath, self.model_fullpath.format(
-            self.model_name, self.best_epoch))
+            if self.patience_counter >= self.patience:
+                print("Early stopping due to validation loss not improving for {} epochs.".format(self.patience))
+                break
 
-        # self.writer.add_graph(self.model)
+        # Check if best model file exists before moving
+        if os.path.isfile(self.best_model_filepath):
+            shutil.move(self.best_model_filepath, self.model_fullpath.format(
+                self.model_name, self.best_epoch))
+
         self.writer.close()
         logInfoWithDot(
             self.logger, "TRAINING FINISHED, TIME USAGE: {} secs".format(
@@ -226,6 +244,7 @@ class HyphalSolver(Solver):
         self.model.eval()
 
         self.test_recorder.reset()
+        total_loss = 0  # to keep track of total loss
 
         for _, (images, labels) in enumerate(self.validloader, 0):
             images = images.to(self.device)
@@ -234,7 +253,11 @@ class HyphalSolver(Solver):
             preds = self.model(images)
             loss = self.criterion(preds, labels)
 
+            total_loss += loss.item()  # update total loss
+
             self.test_recorder.update(preds, labels, loss.item())
+
+        avg_loss = total_loss / len(self.validloader)  # calculate average loss
 
         accuracy = 100.0 * self.test_recorder.correct / self.test_recorder.total
         self.logger.info(
@@ -255,6 +278,8 @@ class HyphalSolver(Solver):
         # Write to Tensorboard file
         self.writer.add_scalar('Loss/val', self.test_recorder.loss, ep)
         self.writer.add_scalar('Accuracy/val', accuracy, ep)
+
+        return avg_loss
 
     def evaluate(self):
         self.model.eval()
@@ -279,5 +304,6 @@ class HyphalSolver(Solver):
 
         return accuracy
 
-def main(): 
+
+def main():
     HyphalSolver()
