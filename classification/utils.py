@@ -18,8 +18,7 @@ from torchvision import models
 sys.path.append(os.path.dirname(sys.path[0]))
 
 from classification.inception3 import inception_v3
-from classification.resnet50 import resnet50 
-
+from classification.resnet50 import resnet50
 
 plt.rc('font', size=12)
 plt.rc('axes', titlesize=12)
@@ -66,6 +65,24 @@ def plot_confusion_matrix(output_folder, cm, classes, normalize=False, filename=
     plt.tight_layout()
     output_filepath = output_folder / filename
     plt.savefig(output_filepath)
+
+def adaptive_threshold(attr, mask=None, method='percentile', p=95):
+    # attr can be numpy array or torch tensor
+    if hasattr(attr, 'detach'):
+        attr = attr.detach().cpu().numpy()
+    a = attr.copy()
+    if mask is not None:
+        # assume mask is 0/1 or boolean same HxW
+        if hasattr(mask, 'detach'):
+            mask = mask.detach().cpu().numpy()
+        a = a[mask > 0]
+    a = a[np.isfinite(a)]
+    if a.size == 0:
+        return 0.0
+    if method == 'percentile':
+        return np.percentile(a, p)
+    # fallback: just return median if unknown method
+    return np.median(a)
 
 
 def set_logging(log_file, log_level=logging.DEBUG):
@@ -145,6 +162,7 @@ def parse_model(opt):
         'model_filename': model_filename,
         'loading_epoch': opt.loading_epoch,
         'cuda': opt.cuda,
+        #'mps' : opt.mps,
         'cuda_id': cuda_id
     }
 
