@@ -11,19 +11,25 @@ import torchvision
     
 class HyphalDataset(torch.utils.data.Dataset):
 
-    label_class_map = {0: 'clear', 1: 'infected'}
+    #label_class_map = {0: 'clear', 1: 'infected'}  (original)
 
-    def __init__(self, dataset_path, train=True, transform=None, target_transform=None):
+    def __init__(self, dataset_path, outdim, train=True, transform=None, target_transform=None):
         self.root_dir = Path(dataset_path['root_path'])
         self.train_filepath = self.root_dir / dataset_path['train_filepath']  
         self.test_filepath = self.root_dir / dataset_path['test_filepath']
         self.train = train
         self.transform = transform
+        self.outdim = outdim   # new
         self.target_transform = target_transform
         if train is True:
             self.data_filepath = self.train_filepath
         else:
             self.data_filepath = self.test_filepath
+
+        if self.outdim == 2:
+            self.label_class_map = {0: 'clear', 1: 'infected'}
+        elif self.outdim == 3:
+            self.label_class_map = {0: 'clear', 1: 'infected', 2: 'conidiophores'}
 
         #  uncommenting these print statements can help with troubleshooting
         # print("Root directory path: ", self.root_dir) 
@@ -59,12 +65,12 @@ def worker_init_fn(worker_id):
 
 
 # use to test the dataset class
-def test_class():
-    label_class_map = {0: 'clear', 1: 'infected'}
+def test_class(outdim):
+    label_class_map = {0: 'clear', 1: 'infected'} if outdim == 2 else {0: 'clear', 1: 'infected', 2: 'conidiophores'}
 
     # Parameters for dataset
     dataset_path = {
-        'root_path': '/content/drive/MyDrive/blackbird/blackbird_dl',
+        'root_path': r'C:\Users\michele.wiseman\Desktop\Saliency_based_Grape_PM_Quantification-main\data\\',
         'meta_filepath': 'metadata.csv',
         'train_filepath': 'train.hdf5',
         'test_filepath': 'test.hdf5'
@@ -72,9 +78,9 @@ def test_class():
 
     transform = torchvision.transforms.Compose([
         torchvision.transforms.ToPILImage(),     # convert to PIL image
-        #torchvision.transforms.Resize(299),  # resize to 299x299
-        torchvision.transforms.RandomHorizontalFlip(p=0.5), # flip horizontally with probability 0.5
-        # torchvision.transforms.RandomAffine(degrees=(0, 180), translate=(0.1, 0.1), scale=(0.8, 1.2)), # random affine transformation
+        torchvision.transforms.Resize(299),  # resize to 299x299
+        torchvision.transforms.RandomHorizontalFlip(p=0.5), # flip horizontally with probability 0.5 
+        torchvision.transforms.RandomAffine(degrees=(0, 180), translate=(0.1, 0.1), scale=(0.8, 1.2)), # random affine transformation
         # torchvision.transforms.RandomRotation(degrees=(0, 180)),
         torchvision.transforms.CenterCrop(224), # crop to 224x224
         torchvision.transforms.ToTensor() # convert to tensor
