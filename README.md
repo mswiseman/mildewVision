@@ -26,11 +26,11 @@ To install the required packages via conda, simply run `conda env create -f envi
 ## Classification Training
 To train your own model, you need:<br>
 
-1. You'll need to assembled a labeled image patch dataset to build the necessary train/test/val .hdf5 files
+1. A labeled image patch dataset to build the necessary train/test/val .hdf5 files
    - you can make image patches using [.preprocessing/makePatches.py](preprocessing/make_patches.py). It's easiest to sort these patches into different directories according to the label (e.g. if infected, put in the "infected" directory. If not infected, put in the "healthy" directory)
    - you can then make a train/test/val hdf5 files (or k-fold splits) using [./preprocessing/images_to_test_train_hdf5.py](preprocessing/images_to_test_train_hdf5.py)
 
-2. Determine mean r/g/b values of your test/train/val sets using [.preprocessing/get_mean_std.py](preprocessing/get_mean_std.py) and plug those into your [./script/train.sh](scripts/train.sh) script under `--means` and `--stds` (super important...this dramatically effects your model performance). 
+2. To determine mean rgb chanel values for your test/train/val sets using [.preprocessing/get_mean_std.py](preprocessing/get_mean_std.py) and plug those into your [./script/train.sh](scripts/train.sh) script under `--means` and `--stds` (super important...this dramatically effects your model performance). 
 
 3. Customize other training parameters such as the model, learning rate, etc. within the [./script/train.sh](scripts/train.sh) script. See the argparse section in [./classification/run.py](classification/run.py) to see full list of customizable variables. <br><br> **Note: You can start with the default values, but your model will perform much better if you try different base models and find the optimal hyperparamters (e.g. by using [Optuna](https://optuna.org/) hyperparameter engineering as shown below).**
 ![optuna](aps2023_visuals/optuna.png)
