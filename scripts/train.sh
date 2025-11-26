@@ -4,7 +4,7 @@
 # run.py training launcher
 #
 # This script trains classification model using
-# ./classification/run.py from the Blackbird / mildewVision pipeline.
+# ../classification/run.py from the Blackbird / mildewVision pipeline.
 #
 # To run:
 #   bash train.sh
