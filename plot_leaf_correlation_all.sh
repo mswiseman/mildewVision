@@ -1,5 +1,21 @@
 #!/usr/bin/env bash
 
+#
+# -----------------------------------------------------------------------------
+# Script: plot_leaf_correlation_all.sh
+#
+# Runs multiple leaf analysis pipelines in parallel using the active Python
+# environment (expected: conda env "mildewVision"). Examples as written launch:
+#   1) Disease severity and saliency map generation (plot_sal_map_leaf.py)
+#   2) Disease severity and optional saliency analysis (leaf_correlation.py)
+#
+# For information on argparse arguments see argparse section in either 
+# plot_sal_map_leaf.py or leaf_correlation.py
+#
+# Usage:
+#   bash plot_leaf_correlation_all.sh
+# -----------------------------------------------------------------------------
+
 # Move to the directory this script lives in (no hard-coded Windows paths)
 # On 309 computer that should be ~/Desktop/blackbird_scripts/
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || {
@@ -44,7 +60,7 @@ commands=(
         --trays 1 \
         --pm Gc_USC1"
 
-    "time \"$PYTHON\" ../leaf_correlation_mw.py \
+    "time \"$PYTHON\" ../leaf_correlation.py \
         --model_type ResNet \
         --model_path ../.. \
         --dataset_path /d/Stacked/Quintec_PM_Resistance_Screens_stained \
