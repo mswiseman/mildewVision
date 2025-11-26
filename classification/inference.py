@@ -43,13 +43,12 @@ def load_dir(dataset_para):
     label_class_map = {'clear': 0, 'infected': 1}
 
     image_folder = dataset_para['image_folder']
-    image_filenames = glob.glob(str(image_folder / '*.png'))
+    image_filenames = glob.glob(str(image_folder / '*.jpg'))
     num = len(image_filenames)
     images = np.ndarray(shape=(num, 224, 224, 3), dtype=np.uint8)
+    #images = np.ndarray(shape=(num, 448, 448, 3), dtype=np.uint8)
     labels = np.zeros(shape=(num, 1), dtype=np.uint8)
     image_filename_list = []
-    # Example filename: 57-Horizon_69_Clear/Infected.jpg, '/' means or
-    #                   1-B9_cinerea_127.jpg, not manually classified
     for i, image_filename in enumerate(image_filenames):
         # Get labels if possible
         image_filename = os.path.basename(image_filename)
@@ -67,36 +66,18 @@ def load_dir(dataset_para):
     return images, image_filename_list, labels
 
 
-def pred_img(
-    x: torch.Tensor,
-    model: torch.nn.Module,
-    *,
-    track_grad: bool = False,      # set True for saliency/explanations
-    use_autocast: bool = True,     # safe to keep True for normal inference
-    return_logits: bool = False
-):
+def pred_img(img, model):
     """
-    x: FloatTensor of shape [B, C, H, W], already normalized & on the right device.
-    Returns:
-      pred  : LongTensor [B]
-      prob  : FloatTensor [B, num_classes]
-      logits: (optional) FloatTensor [B, num_classes]
+        Get predicted image class and prob using well-trained model
+    Args:
+        img: PIL image or np.ndarray
     """
-    # Choose the correct grad context
-    ctx = torch.enable_grad() if track_grad else torch.no_grad()
-    with ctx:
-        if use_autocast and not track_grad and torch.cuda.is_available():
-            # Autocast can interfere with some attribution methods, so we disable when track_grad=True
-            with torch.autocast(device_type="cuda"):
-                logits = model(x)
-        else:
-            logits = model(x)
 
-        prob = F.softmax(logits, dim=1)
-        pred = prob.argmax(dim=1)
+    out = model(img)
 
-    if return_logits:
-        return pred, prob, logits
+    pred = torch.argmax(out, axis=1)
+    prob = F.softmax(out, dim=1)
+
     return pred, prob
 
 
@@ -168,7 +149,6 @@ if __name__ == "__main__":
                         help='seg dataset to be tested')
     parser.add_argument('--set', default='val', choices=['train', 'val', 'test'],
                         help='use train/val/test set for inference')
-
     opt = parser.parse_args()
 
     model_para = parse_model(opt)
@@ -178,8 +158,8 @@ if __name__ == "__main__":
     output_folder = Path(
         os.getcwd()).parent / 'results' / 'journal'
 
-    means = [123. / 255., 150. / 255., 86. / 255.]
-    stds = [34. / 255., 34. / 255., 45. / 255.]
+    means = [84./255., 156./255., 120./255.]
+    stds = [48./255., 35./255., 38./255.]
         
     subfolder_name = 'inference_results'
     if opt.set == 'train':
@@ -197,8 +177,8 @@ if __name__ == "__main__":
             subfolder_name = f'cross_validation/seg_dataset_{opt.cv_seg_dataset}'
     elif opt.set == 'test':
         test_filepath = r'test_set.hdf5'
-        means = [123. / 255., 150. / 255., 86. / 255.]
-        stds = [34. / 255., 34. / 255., 45. / 255.]
+        means = [118./255., 165./255., 92./255.]
+        stds = [40./255., 35./255., 51./255.]
 
     output_folder = output_folder / subfolder_name / opt.group / opt.model_type
 
