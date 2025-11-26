@@ -33,7 +33,7 @@ To train your own model, you need:<br>
 
 2. To determine mean rgb chanel values for your test/train/val sets using [preprocessing/get_mean_std.py](preprocessing/get_mean_std.py) and plug those into your [scripts/train.sh](scripts/train.sh) script under `--means` and `--stds` (super important...this dramatically effects your model performance). 
 
-3. Customize other training parameters such as the model, learning rate, etc. within the [scripts/train.sh](scripts/train.sh) script. See the argparse section in [classification/run.py](classification/run.py) to see full list of customizable variables. <br><br> **Note: You can start with the default values, but your model will perform much better if you try different base models and find the optimal hyperparamters (e.g. by using [Optuna](https://optuna.org/) hyperparameter engineering as shown below).**
+3. Customize other training parameters such as the model, learning rate, etc. within the [scripts/train.sh](scripts/train.sh) script. See the argparse section in [classification/run.py](classification/run.py) to see full list of customizable variables. <br><br> Note: You can start with the default values, but your model will likely perform better if you try different base models and hyperparamter values (e.g. by using [Optuna](https://optuna.org/) hyperparameter optimization as shown below). Always cross-validate and test to ensure you're not overfitting though. 
 ![optuna](aps2023_visuals/optuna.png)
 
 
