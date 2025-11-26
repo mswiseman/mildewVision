@@ -18,8 +18,7 @@ from torchvision import models
 sys.path.append(os.path.dirname(sys.path[0]))
 
 from classification.inception3 import inception_v3
-from classification.resnet50 import resnet50 
-
+from classification.resnet50 import resnet50
 
 plt.rc('font', size=12)
 plt.rc('axes', titlesize=12)
@@ -66,6 +65,24 @@ def plot_confusion_matrix(output_folder, cm, classes, normalize=False, filename=
     plt.tight_layout()
     output_filepath = output_folder / filename
     plt.savefig(output_filepath)
+
+def adaptive_threshold(attr, mask=None, method='percentile', p=95):
+    # attr can be numpy array or torch tensor
+    if hasattr(attr, 'detach'):
+        attr = attr.detach().cpu().numpy()
+    a = attr.copy()
+    if mask is not None:
+        # assume mask is 0/1 or boolean same HxW
+        if hasattr(mask, 'detach'):
+            mask = mask.detach().cpu().numpy()
+        a = a[mask > 0]
+    a = a[np.isfinite(a)]
+    if a.size == 0:
+        return 0.0
+    if method == 'percentile':
+        return np.percentile(a, p)
+    # fallback: just return median if unknown method
+    return np.median(a)
 
 
 def set_logging(log_file, log_level=logging.DEBUG):
@@ -145,6 +162,7 @@ def parse_model(opt):
         'model_filename': model_filename,
         'loading_epoch': opt.loading_epoch,
         'cuda': opt.cuda,
+        #'mps' : opt.mps,
         'cuda_id': cuda_id
     }
 
@@ -227,62 +245,28 @@ def init_model(model):
     return m
 
 
-def init_optimizer(optimizer_cfg, model):
-    """
-    optimizer_cfg keys (all optional except lr/weight_decay/optim_type):
-      - optim_type: 'AdamW' | 'Adam' | 'SGD' | 'RMSprop' | 'Adadelta'
-      - lr: float
-      - weight_decay: float
-      - momentum: float (SGD, RMSprop)
-      - nesterov: bool (SGD)
-      - beta1, beta2, eps: floats (Adam/AdamW)
-      - alpha: float (RMSprop)
-      - centered: bool (RMSprop)
-      - rho, eps: floats (Adadelta)
-    """
-    params = model.parameters()
-    opt_type = optimizer_cfg.get('optim_type', 'AdamW')
-    lr = float(optimizer_cfg.get('lr', 1e-3))
-    wd = float(optimizer_cfg.get('weight_decay', 0.0))
-
-    if opt_type == 'SGD':
-        momentum = float(optimizer_cfg.get('momentum', 0.9))
-        nesterov = bool(optimizer_cfg.get('nesterov', False))
-        return optim.SGD(
-            params, lr=lr, momentum=momentum, nesterov=nesterov, weight_decay=wd
-        )
-
-    elif opt_type == 'AdamW':
-        beta1 = float(optimizer_cfg.get('beta1', 0.9))
-        beta2 = float(optimizer_cfg.get('beta2', 0.999))
-        eps   = float(optimizer_cfg.get('eps', 1e-8))
-        return optim.AdamW(
-            params, lr=lr, betas=(beta1, beta2), eps=eps, weight_decay=wd
-        )
-
-    elif opt_type == 'Adam':
-        beta1 = float(optimizer_cfg.get('beta1', 0.9))
-        beta2 = float(optimizer_cfg.get('beta2', 0.999))
-        eps   = float(optimizer_cfg.get('eps', 1e-8))
-        return optim.Adam(
-            params, lr=lr, betas=(beta1, beta2), eps=eps, weight_decay=wd
-        )
-
-    elif opt_type == 'RMSprop':
-        alpha    = float(optimizer_cfg.get('alpha', 0.99))
-        momentum = float(optimizer_cfg.get('momentum', 0.0))
-        centered = bool(optimizer_cfg.get('centered', False))
-        return optim.RMSprop(
-            params, lr=lr, alpha=alpha, momentum=momentum,
-            centered=centered, weight_decay=wd
-        )
-
-    elif opt_type == 'Adadelta':
-        rho = float(optimizer_cfg.get('rho', 0.9))
-        eps = float(optimizer_cfg.get('eps', 1e-6))
-        return optim.Adadelta(
-            params, lr=lr, rho=rho, eps=eps, weight_decay=wd
-        )
-
+def init_optimizer(optimizer, model):
+    opt = None
+    lr = optimizer['lr']
+    weight_decay = optimizer['weight_decay']
+    parameters = model.parameters()
+    if optimizer['optim_type'] == 'Adam':
+        opt = optim.Adam(parameters,
+                         lr=lr,
+                         weight_decay=weight_decay)
+    elif optimizer['optim_type'] == 'Adadelta':
+        opt = optim.Adadelta(parameters,
+                             lr=lr,
+                             weight_decay=weight_decay)
+    elif optimizer['optim_type'] == 'SGD':
+        opt = optim.SGD(parameters,
+                        lr=lr,
+                        momentum=0.9,
+                        weight_decay=weight_decay)
     else:
-        raise ValueError(f"Unknown optim_type: {opt_type}")
+        opt = optim.RMSprop(parameters,
+                            lr=lr,
+                            weight_decay=weight_decay)
+
+    assert opt != None, 'Optimizer Not Initialized'
+    return opt
