@@ -1,1 +1,0 @@
-Model checkpoints should be saved here with the format: [BB]_model_ep[number]. For example: ResNet_model_ep040

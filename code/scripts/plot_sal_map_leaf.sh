@@ -55,27 +55,25 @@ trays=("1" "2" "3" "4")
 for tray in "${trays[@]}"; do
     echo "Processing tray: $tray"
 
-    time python ../plot_sal_map_leaf.py                \
+    time python3 ../plot_sal_map_leaf.py                \
         --model_type     ResNet                        \
         --model_path     ../..                         \
-        --dataset_path   /e/Stacked/2025_Pheno         \
-        --loading_epoch  59                            \
+        --dataset_path   ../../data                    \
+        --loading_epoch  40                            \
         --threshold      0.7                           \
         --up_threshold   0.8                           \
-        --down_threshold 0.3                           \
-        --cuda                                         \
-        --cuda_id       0                              \
+        --down_threshold 0.2                           \
         --outdim        2                              \
         --means         0.5410 0.6371 0.4188           \
         --stds          0.1764 0.1650 0.2326           \
-        --timestamp     Feb14_15-53-04_2024            \
-        --dpi           2                              \
+        --timestamp     Aug12_19-19-05_2025            \
+        --dpi           10                             \
         --pretrained                                   \
         --sal_gradient                                 \
         --sal_deeplift                                 \
-        --img_folder    10-3-2025_2dpi                 \
+        --img_folder    6-28-2023_10dpi                \
         --trays         "$tray"                        \
-        --pm            Gc_USC1
+        --pm            HPM-666
 
 done
 

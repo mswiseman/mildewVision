@@ -15,14 +15,15 @@ import torch
 import torch.nn.functional as F
 from torchvision import transforms as tvtrans
 
-from analyzer_config import (CHANNELS, IMG_HEIGHT, IMG_WIDTH, IMG_EXT, INPUT_SIZE)
-
 from metric import pixel_sr1, patch_sr
 
 from classification.inference import pred_img
 from classification.utils import timeSince, printArgs, load_model, parse_model, set_logging, adaptive_threshold
 
 from analysis.leaf_mask import leaf_mask, on_focus
+
+from analyzer_config import (
+    CHANNELS, IMG_HEIGHT, IMG_WIDTH, IMG_EXT, INPUT_SIZE)
 
 from visualization.viz_util import _normalize_image_attr
 from visualization.viz_helper import (get_first_conv_layer, get_last_conv_layer, viz_image_attr, normalize_image_attr,
@@ -103,11 +104,16 @@ opt = parser.parse_args()
 warnings.filterwarnings("ignore", category=UserWarning, module="captum.attr._core.deep_lift")
 
 # set device
-if opt.cuda:
+# set device
+if opt.cuda and torch.cuda.is_available():
     os.environ["CUDA_VISIBLE_DEVICES"] = str(opt.cuda_id)
-    device_type = 'cuda'
+    device = torch.device("cuda")
+elif opt.mps and torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
 
-gpu = torch.device(device_type)
+print(f"Using device: {device}")
 
 # set logging options
 logger = set_logging(Path(str(opt.log)), 20)
@@ -289,7 +295,7 @@ for tray_id in opt.trays:
                     input_img = preprocess(subim_arr).unsqueeze(0).to(device).requires_grad_(True)
 
                     # Inference (keep grads for saliency)
-                    pred, prob = pred_img(input_img, model, track_grad=True, use_autocast=False)
+                    pred, prob = pred_img(input_img, model)
                     logits_class = int(pred.item())
                     prob_value   = float(prob[0, 1].detach().cpu().item())
                     if outdim == 3:

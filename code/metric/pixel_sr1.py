@@ -13,7 +13,7 @@ def metric(patch_info, heatmap_info, threshold_info, outdim):
 
     Args:
     - patch_info (dict): Contains patch-related information.
-    - heatmap_info (dict): Contains heatmap-related information.
+    - heatmap_info (dict): Contains heatmap-relaIMG_HEIGHTted information.
     - threshold_info (dict): Contains threshold-related information.
     - outdim (int): Output dimension of the model.
 
