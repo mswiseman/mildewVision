@@ -50,7 +50,7 @@
 ###############################################################################
 
 # Tray numbers to process (edit as needed)
-trays=("1" "2" "3" "4")
+trays=("1")
 
 for tray in "${trays[@]}"; do
     echo "Processing tray: $tray"
@@ -59,14 +59,14 @@ for tray in "${trays[@]}"; do
         --model_type     ResNet                        \
         --model_path     ../..                         \
         --dataset_path   ../../data                    \
-        --loading_epoch  40                            \
+        --loading_epoch  44                            \
         --threshold      0.7                           \
         --up_threshold   0.8                           \
         --down_threshold 0.2                           \
         --outdim        2                              \
         --means         0.5410 0.6371 0.4188           \
         --stds          0.1764 0.1650 0.2326           \
-        --timestamp     Aug12_19-19-05_2025            \
+        --timestamp     Feb14_05-52-08_2024            \
         --dpi           10                             \
         --pretrained                                   \
         --sal_gradient                                 \
@@ -76,4 +76,3 @@ for tray in "${trays[@]}"; do
         --pm            HPM-666
 
 done
-
