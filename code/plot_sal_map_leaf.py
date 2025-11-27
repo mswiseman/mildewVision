@@ -1,48 +1,50 @@
+# Standard library
+import argparse
+import gc
 import os
 import time
-import argparse
-import pandas as pd
-import numpy as np
-from datetime import datetime
 import warnings
-import gc
 from collections import defaultdict
-from PIL import Image, ImageTk
+from datetime import datetime
 from pathlib import Path
-from matplotlib import pyplot as plt
 
+# Third-party
+import numpy as np
+import pandas as pd
+from PIL import Image
+from matplotlib import pyplot as plt
 import torch
 import torch.nn.functional as F
 from torchvision import transforms as tvtrans
 
-from metric import pixel_sr1, patch_sr
-
-from classification.inference import pred_img
-from classification.utils import timeSince, printArgs, load_model, parse_model, set_logging, adaptive_threshold
-
+# Local imports
+from analyzer_config import IMG_HEIGHT, IMG_WIDTH
 from analysis.leaf_mask import leaf_mask, on_focus
-
-from analyzer_config import (
-    CHANNELS, IMG_HEIGHT, IMG_WIDTH, IMG_EXT, INPUT_SIZE)
-
-from visualization.viz_util import _normalize_image_attr
-from visualization.viz_helper import (get_first_conv_layer, get_last_conv_layer, viz_image_attr, normalize_image_attr,
-                                      plot_figs, save_figs)
-
+from classification.inference import pred_img
+from classification.utils import (
+    adaptive_threshold,
+    load_model,
+    parse_model,
+    printArgs,
+    set_logging,
+    timeSince,
+)
+from metric import patch_sr, pixel_sr1
 from sanity_check.utils import get_saliency_methods, get_saliency_masks
-
-
-from scipy import ndimage
-
+from visualization.viz_helper import (
+    get_first_conv_layer,
+    get_last_conv_layer,
+    normalize_image_attr,
+)
 
 gc.collect()
-torch.cuda.empty_cache()
-
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
 
 np.random.seed(2020)
 
 """ Usage
-Analyze the full-size leaf disc images and calculate the severity rate
+Analyze the full-size leaf disc images and calculate the severity rate and return the saliency map(s)
 Given a date, do analysis on all the data collected in that date
 """
 
@@ -57,8 +59,8 @@ parser.add_argument('--timestamp', required=True, help='model timestamp')
 parser.add_argument('--outdim', type=int, default=2, help='number of classes')
 parser.add_argument('--model_path', type=str, required=True, help='root path to the model')
 parser.add_argument('--step_size', type=int, default=224, help='step size of sliding window')
-parser.add_argument('--means', type=float, nargs='+', default=[0.504, 0.604, 0.361])
-parser.add_argument('--stds',  type=float, nargs='+', default=[0.144, 0.142, 0.192])
+parser.add_argument('--means', type=float, nargs='+', default=[0.504, 0.604, 0.361], help='list of means for each rgb channel')
+parser.add_argument('--stds',  type=float, nargs='+', default=[0.144, 0.142, 0.192], help='list of standard deviations for each rgb channel')
 parser.add_argument('--target_class', type=int, default=1, help='target class for saliency mapping')
 parser.add_argument('--contam_control',  action='store_true', help='use contamination control conditional logic')
 parser.add_argument('--pm', type=str, help='PM isolate used for inoculation - collected for metadata in the csv')
@@ -85,13 +87,13 @@ parser.add_argument('--threshold', nargs='+', help='thresholding value for pixel
 parser.add_argument('--log', type=str, default='../../results/logs/random.log', help='log file path')
 parser.add_argument('--dpi', type=int, required=True, help='inoculation date')
 parser.add_argument('--group', type=str, default='baseline', help='exp group')
-parser.add_argument('--trays', nargs='+', help='trays')
+parser.add_argument('--trays', nargs='+', required=True, help='tray ids')
 
 # saliency mapping flags
-parser.add_argument('--sal_gradcam', action='store_true')
-parser.add_argument('--sal_gradient', action='store_true')
-parser.add_argument('--sal_smoothgrad', action='store_true')
-parser.add_argument('--sal_deeplift', action='store_true')
+parser.add_argument('--sal_gradcam', action='store_true', help='make saliency map using gradcam')
+parser.add_argument('--sal_gradient', action='store_true', help='make saliency map using gradient')
+parser.add_argument('--sal_smoothgrad', action='store_true', help='make saliency map using smoothgrad')
+parser.add_argument('--sal_deeplift', action='store_true', help='make saliency map using deeplift')
 parser.add_argument('--sal_thresh_method', type=str, default='percentile',
                     choices=['percentile', 'fixed'],
                     help='How to compute saliency threshold per image/method')
@@ -103,7 +105,6 @@ opt = parser.parse_args()
 # filter out routine warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="captum.attr._core.deep_lift")
 
-# set device
 # set device
 if opt.cuda and torch.cuda.is_available():
     os.environ["CUDA_VISIBLE_DEVICES"] = str(opt.cuda_id)
@@ -135,7 +136,7 @@ dataset_path = Path(opt.dataset_path) / image_timestamp
 mask_path = Path(opt.dataset_path) / f'{image_timestamp}_masking'
 model_string = model_type + '_upth' + str(opt.up_threshold) + '_downth' + str(
     opt.down_threshold) + '_' + opt.timestamp
-output_folder = Path(opt.dataset_path).parents[0] / 'Results' / model_string / image_timestamp
+output_folder = Path(opt.dataset_path).parents[0] / 'results' / model_string / image_timestamp
 
 # Threshold for severity ratio
 down_th = opt.down_threshold  # below this will be classified as healthy
@@ -171,7 +172,6 @@ if opt.model_type == 'Inception3':
 else:
     preprocess = tvtrans.Compose([
         tvtrans.ToPILImage(),
-        #tvtrans.Lambda(lambda img: tvtrans.functional.adjust_brightness(img, 0.75)), # changed to improve conidiophore detection
         tvtrans.ToTensor(),
         tvtrans.Normalize(means, stds)
     ])
@@ -209,7 +209,7 @@ PM = opt.pm
 
 severity_rate_dfs = defaultdict(lambda: pd.DataFrame(columns=META_COL_NAMES))
 
-threshold = 0.7 # threshold for saliency map
+threshold = 0.7  # threshold for saliency map
 default_cmap = 'Blues'
 
 # Time
@@ -245,7 +245,7 @@ for tray_id in opt.trays:
         subim_x = (width - IMG_WIDTH) // step_size + 1
         subim_y = (height - IMG_HEIGHT) // step_size + 1
         subim_height = (subim_y - 1) * step_size + IMG_HEIGHT
-        subim_width  = (subim_x - 1) * step_size + IMG_WIDTH
+        subim_width = (subim_x - 1) * step_size + IMG_WIDTH
         sub_img = img.crop((0, 0, subim_width, subim_height))
         sub_img_arr = np.asarray(sub_img)
 
@@ -263,8 +263,8 @@ for tray_id in opt.trays:
         patch_idx = coor_x = coor_y = 0
         infected_patch = conidiophore_patch = clear_patch = discard_patch = lost_focus_patch = 0
 
-        counting_map   = np.zeros((height, width), dtype=np.float32)
-        prob_attrs1    = np.zeros((subim_x * subim_y, IMG_HEIGHT, IMG_WIDTH), dtype=np.float32)
+        counting_map = np.zeros((height, width), dtype=np.float32)
+        prob_attrs1 = np.zeros((subim_x * subim_y, IMG_HEIGHT, IMG_WIDTH), dtype=np.float32)
         if outdim == 3:
             prob_attrs2 = np.zeros((subim_x * subim_y, IMG_HEIGHT, IMG_WIDTH), dtype=np.float32)
 
@@ -297,7 +297,7 @@ for tray_id in opt.trays:
                     # Inference (keep grads for saliency)
                     pred, prob = pred_img(input_img, model)
                     logits_class = int(pred.item())
-                    prob_value   = float(prob[0, 1].detach().cpu().item())
+                    prob_value = float(prob[0, 1].detach().cpu().item())
                     if outdim == 3:
                         prob_value2 = float(prob[0, 2].detach().cpu().item())
 
@@ -471,12 +471,13 @@ for tray_id in opt.trays:
         # Visualizations (overlay uses per-method adaptive t)
         # -------------------------------
         alpha = 0.5
+
         # raw
         out_fp = output_leaf_disk_image_folder / f'{opt.dpi}_{f}_raw.{format_}'
-        plt.imshow(img_arr);
-        plt.axis('off');
+        plt.imshow(img_arr)
+        plt.axis('off')
         plt.tight_layout()
-        plt.savefig(out_fp, format=format_, dpi=300, bbox_inches='tight', pad_inches=0);
+        plt.savefig(out_fp, format=format_, dpi=300, bbox_inches='tight', pad_inches=0)
         plt.close()
 
         # masked background
@@ -494,7 +495,7 @@ for tray_id in opt.trays:
         plt.imshow(sub_img_arr_copy)
         plt.axis('off')
         plt.tight_layout()
-        #plt.savefig(output_leaf_disk_image_filepath, format=format_,
+        # plt.savefig(output_leaf_disk_image_filepath, format=format_,
         #            dpi=300, bbox_inches='tight', pad_inches=0)
 
         if outdim == 2:
@@ -550,7 +551,6 @@ for tray_id in opt.trays:
             count_class2 = np.sum(value2 == 1)
             count_combined = np.sum(combined_value == 1) / (224 * 224)
 
-
             # Display information on the figure
             plt.text(100, 300, f'Healthy Patches: {clear_patch}', color='white', fontsize=6,
                      bbox=dict(facecolor='black', alpha=0.5))
@@ -575,20 +575,20 @@ for tray_id in opt.trays:
             t = float(adaptive_th.get(key, overlay_thresh_fixed))
             bin_map = (heat >= t).astype('uint8')
             out_fp = output_leaf_disk_image_folder / f'{opt.dpi}_{key}_th{t:.4f}_{f}_blended.{format_}'
-            alphas = np.full(imask.shape, alpha, dtype=float);
+            alphas = np.full(imask.shape, alpha, dtype=float)
             alphas[bin_map == 0] = 0.0
-            plt.imshow(sub_img_arr_copy);
+            plt.imshow(sub_img_arr_copy)
             plt.imshow(bin_map, alpha=alphas, cmap=default_cmap)
-            plt.axis('off');
+            plt.axis('off')
             plt.tight_layout()
-            plt.savefig(out_fp, format=format_, dpi=300, bbox_inches='tight', pad_inches=0);
+            plt.savefig(out_fp, format=format_, dpi=300, bbox_inches='tight', pad_inches=0)
             plt.close()
 
             out_fp = output_leaf_disk_image_folder / f'{key}_sal_bin_th{t:.4f}_{f}.{format_}'
-            plt.imshow(bin_map, cmap=default_cmap);
-            plt.axis('off');
+            plt.imshow(bin_map, cmap=default_cmap)
+            plt.axis('off')
             plt.tight_layout()
-            plt.savefig(out_fp, format=format_, dpi=300, bbox_inches='tight', pad_inches=0);
+            plt.savefig(out_fp, format=format_, dpi=300, bbox_inches='tight', pad_inches=0)
             plt.close()
 
         # -------------------------------
@@ -628,6 +628,6 @@ for tray_id in opt.trays:
     output_csv_folder_th = output_folder / 'th'
     os.makedirs(output_csv_folder_th, exist_ok=True)
     for thf, df in per_tray_dfs.items():
-        out_csv = output_csv_folder_th / f'severity_rate_tray{tray_id}_th{thf:.4f}.csv'
+        out_csv = output_csv_folder_th / f'severity_rate_tray{tray_id}_th{thf:.1f}.csv'
         df.to_csv(out_csv, index=False)
         logger.info('Saved %s', out_csv)
