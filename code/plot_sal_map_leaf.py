@@ -136,7 +136,7 @@ dataset_path = Path(opt.dataset_path) / image_timestamp
 mask_path = Path(opt.dataset_path) / f'{image_timestamp}_masking'
 model_string = model_type + '_upth' + str(opt.up_threshold) + '_downth' + str(
     opt.down_threshold) + '_' + opt.timestamp
-output_folder = Path(opt.dataset_path).parents[0] / 'results' / model_string / image_timestamp
+output_folder = Path(opt.dataset_path).parents[0] / 'results' / 'plot_sal_map_output'/ model_string / image_timestamp
 
 # Threshold for severity ratio
 down_th = opt.down_threshold  # below this will be classified as healthy
