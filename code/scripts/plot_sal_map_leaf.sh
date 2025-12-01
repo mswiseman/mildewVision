@@ -59,7 +59,7 @@ for tray in "${trays[@]}"; do
         --model_type     ResNet                        \
         --model_path     ../..                         \
         --dataset_path   ../../data                    \
-        --loading_epoch  44                            \
+        --loading_epoch  59                            \
         --threshold      0.7                           \
         --up_threshold   0.8                           \
         --down_threshold 0.2                           \

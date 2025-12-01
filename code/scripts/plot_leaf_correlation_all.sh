@@ -41,7 +41,7 @@ commands=(
     "time \"$PYTHON\" ../plot_sal_map_leaf.py \
         --model_type ResNet \
         --model_path ../.. \
-        --dataset_path /e/Stacked/2025_AtTKO_HlMLO_Pheno \
+        --dataset_path ../../data \
         --loading_epoch 59 \
         --threshold 0.7 \
         --up_threshold 0.8 \
@@ -56,14 +56,14 @@ commands=(
         --pretrained \
         --sal_gradient \
         --sal_deeplift \
-        --img_folder 10-3-2025_2dpi \
+        --img_folder 6-28-2023_10dpi \
         --trays 1 \
-        --pm Gc_USC1"
+        --pm HPM-666"
 
     "time \"$PYTHON\" ../leaf_correlation.py \
         --model_type ResNet \
         --model_path ../.. \
-        --dataset_path /d/Stacked/Quintec_PM_Resistance_Screens_stained \
+        --dataset_path ../../data \
         --loading_epoch 59 \
         --threshold 0.7 \
         --up_threshold 0.8 \
@@ -76,10 +76,11 @@ commands=(
         --timestamp Feb14_15-53-04_2024 \
         --dpi 10 \
         --pretrained \
-        --img_folder 11-24-2025_10dpi \
+        --img_folder 6-28-2023_10dpi \
         --trays 1 \
         --sal_gradient \
-        --pm various"
+	    --sal_deeplift \
+        --pm HPM-666"
 )
 
 wait_for_free_job_slot() {

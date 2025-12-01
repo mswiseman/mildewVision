@@ -1,1 +1,1 @@
-Images are too large for github, so you can find a few more downy and powdery mildew images [here](https://ars-usda.box.com/s/cfuosvlzzldi53pbjocjmbnf2ymhrkwa). 
+I have included one example image so you can test the pipeline. Unfortunately, images are too large to host several on github, so you can find a few more downy and powdery mildew images [here](https://ars-usda.box.com/s/cfuosvlzzldi53pbjocjmbnf2ymhrkwa). 
