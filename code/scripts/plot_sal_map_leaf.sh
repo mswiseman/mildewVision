@@ -66,7 +66,7 @@ for tray in "${trays[@]}"; do
         --outdim        2                              \
         --means         0.5410 0.6371 0.4188           \
         --stds          0.1764 0.1650 0.2326           \
-        --timestamp     Feb14_05-52-08_2024            \
+        --timestamp     Feb14_15-53-04_2024            \
         --dpi           10                             \
         --pretrained                                   \
         --sal_gradient                                 \
