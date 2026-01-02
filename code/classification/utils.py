@@ -176,21 +176,39 @@ def set_parameter_requires_grad(model, feature_extracting):
 
 
 def load_model(model_para):
-    """
-        Load well-trained model
-    """
     model = init_model(model_para)
-    model_fullpath = str(
-        model_para['model_path'] / model_para['model_filename'])
 
     cuda_id = model_para['cuda_id']
-    device = torch.device(
-        f'cuda:{cuda_id}' if cuda_id else 'cpu')
+    device = torch.device(f'cuda:{cuda_id}' if cuda_id else 'cpu')
 
-    checkpoint = torch.load(model_fullpath.format(
-        model_para['model_type'], model_para['loading_epoch']), map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # model_filename is a format string like '{0}_model_ep{1:03}'
+    filename = model_para['model_filename'].format(
+        model_para['model_type'],
+        model_para['loading_epoch']
+    )
 
+    # base path without assuming extension
+    base = model_para['model_path'] / filename
+
+    # try: no suffix, .tar, .pth, .pt
+    suffixes = ["", ".tar", ".pth", ".pt"]
+    candidates = [base if s == "" else base.with_suffix(s) for s in suffixes]
+
+    ckpt_path = next((p for p in candidates if p.exists()), None)
+    if ckpt_path is None:
+        raise FileNotFoundError(
+            "Could not find checkpoint. Tried:\n" + "\n".join(str(p) for p in candidates)
+        )
+
+    checkpoint = torch.load(ckpt_path, map_location=device)
+
+    # checkpoint may be {"model_state_dict": ...} or directly a state_dict
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        state_dict = checkpoint
+
+    model.load_state_dict(state_dict)
     return model.to(device), device
 
 

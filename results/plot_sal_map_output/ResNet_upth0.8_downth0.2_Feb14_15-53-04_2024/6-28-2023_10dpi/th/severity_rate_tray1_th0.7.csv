@@ -1,0 +1,2 @@
+timestamp,model_type,model_timestamp,classes,step_size,imaging_date,tray,filename,up_th,down_th,sal_threshold,clear_patches,hyphal_patches,severity_rate_patch,PM,time_elapsed,Gradient_sr2
+2025-12-31 14:02:21,ResNet,Feb14_15-53-04_2024,2,224,6-28-2023_10dpi,1,039-SYMPHONY_R1,0.8,0.2,0.7,45,669,93.7,HPM-666,5m 29s,2.96
