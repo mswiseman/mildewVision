@@ -408,8 +408,7 @@ def get_saliency_masks(saliency_methods, input_img, logits_class, relu_attributi
         output_masks[key] = attr.transpose(1, 2, 0)
 
     if 'Guided\nBackProp' in output_masks.keys():
-        output_masks['GBP-GC'] = np.m
-        ultiply(
+        output_masks['GBP-GC'] = np.multiply(
             output_masks['Guided\nBackProp'], output_masks['GradCAM'])
 
     return output_masks

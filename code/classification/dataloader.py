@@ -11,7 +11,7 @@ import torchvision
     
 class HyphalDataset(torch.utils.data.Dataset):
 
-    label_class_map = {0: 'clear', 1: 'infected', 2: 'conidiophores'}
+    label_class_map = {0: 'clear', 1: 'infected', 2: 'conidiophore'}
 
     def __init__(self, dataset_path, train=True, transform=None, target_transform=None):
         self.root_dir = Path(dataset_path['root_path'])
@@ -35,7 +35,7 @@ class HyphalDataset(torch.utils.data.Dataset):
             image_ds = f['images']
             self.images = image_ds[:, ]
             label_ds = f['labels']
-            self.labels = label_ds[:]
+            self.labels = label_ds[:].reshape(-1).astype(np.int64)
 
     def __len__(self):
         return len(self.labels)
