@@ -28,7 +28,10 @@ plt.rc('ytick', labelsize=12)
 plt.rc('figure', titlesize=12)
 
 
-def plot_confusion_matrix(output_folder, cm, classes, normalize=False, filename='confusion-matrix.png', title='Confusion Matrix', cmap=plt.cm.Blues):
+def plot_confusion_matrix(output_folder, cm, classes, normalize=False,
+                          filename='confusion-matrix.png',
+                          title='Confusion Matrix',
+                          cmap=plt.cm.Blues):
     """
         Plot confusion matrix
     Args:
@@ -36,6 +39,7 @@ def plot_confusion_matrix(output_folder, cm, classes, normalize=False, filename=
         cm:               Confusion matrix ndarray
         classes:          A list of class
     """
+
     cm_copy = cm.copy()
     if normalize:
         cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
@@ -44,27 +48,45 @@ def plot_confusion_matrix(output_folder, cm, classes, normalize=False, filename=
         print('Confusion matrix, without normalization')
 
     print(cm)
-    fig = plt.figure(figsize=(10, 8))
+
+    fig = plt.figure(figsize=(7.5, 6))
     plt.imshow(cm, interpolation='nearest', cmap=cmap)
-    plt.title(title)
+
+    plt.title(title, fontsize=18)
     plt.colorbar()
+
     tick_marks = np.arange(len(classes))
-    plt.xticks(tick_marks, classes, rotation=45)
-    plt.yticks(tick_marks, classes)
+    plt.xticks(tick_marks, classes, rotation=45, fontsize=14)
+    plt.yticks(tick_marks, classes, fontsize=14)
 
     fmt = '.4f' if normalize else 'd'
     thresh = cm.max() / 2.
-    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
-        plt.text(j, i, format(cm[i, j], fmt), horizontalalignment="center",
-                 color="white" if cm[i, j] > thresh else "black")
-        plt.text(j, i+0.1, format(cm_copy[i, j], 'd'), horizontalalignment="center",
-                 color="white" if cm[i, j] > thresh else "black")
 
-    plt.ylabel('True label')
-    plt.xlabel('Predicted label')
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+
+        plt.text(
+            j, i,
+            format(cm[i, j], fmt),
+            horizontalalignment="center",
+            color="white" if cm[i, j] > thresh else "black",
+            fontsize=16
+        )
+
+        plt.text(
+            j, i + 0.1,
+            format(cm_copy[i, j], 'd'),
+            horizontalalignment="center",
+            color="white" if cm[i, j] > thresh else "black",
+            fontsize=12
+        )
+
+    plt.ylabel('True label', fontsize=16)
+    plt.xlabel('Predicted label', fontsize=16)
     plt.tight_layout()
+
     output_filepath = output_folder / filename
-    plt.savefig(output_filepath)
+    plt.savefig(output_filepath, dpi=300)
+    plt.close()
 
 def adaptive_threshold(attr, mask=None, method='percentile', p=95):
     # attr can be numpy array or torch tensor
