@@ -280,33 +280,84 @@ def init_model(model):
         m.fc = nn.Linear(m.fc.in_features, outdim, bias=True)
         m.AuxLogits.fc = nn.Linear(
             m.AuxLogits.fc.in_features, outdim, bias=True)
+    elif model['model_type'] == 'EfficientNetV2M':
+        m = models.efficientnet_v2_m(pretrained=pretrained)
+        set_parameter_requires_grad(m, feature_extract)
+        # classifier = Sequential(Dropout, Linear)
+        m.classifier[1] = nn.Linear(m.classifier[1].in_features, outdim, bias=True)
+    elif model['model_type'] == 'EfficientNetV2S':
+        m = models.efficientnet_v2_s(pretrained=pretrained)
+        set_parameter_requires_grad(m, feature_extract)
+        # classifier = Sequential(Dropout, Linear)
+        m.classifier[1] = nn.Linear(m.classifier[1].in_features, outdim, bias=True)
+    elif model['model_type'] == 'EfficientNetB4':
+        m = models.efficientnet_b4(pretrained=pretrained)
+        set_parameter_requires_grad(m, feature_extract)
+        # classifier = Sequential(Dropout, Linear)
+        m.classifier[1] = nn.Linear(m.classifier[1].in_features, outdim, bias=True)
+
 
     assert m != None, 'Model Not Initialized'
     return m
 
 
-def init_optimizer(optimizer, model):
-    opt = None
-    lr = optimizer['lr']
-    weight_decay = optimizer['weight_decay']
-    parameters = model.parameters()
-    if optimizer['optim_type'] == 'Adam':
-        opt = optim.Adam(parameters,
-                         lr=lr,
-                         weight_decay=weight_decay)
-    elif optimizer['optim_type'] == 'Adadelta':
-        opt = optim.Adadelta(parameters,
-                             lr=lr,
-                             weight_decay=weight_decay)
-    elif optimizer['optim_type'] == 'SGD':
-        opt = optim.SGD(parameters,
-                        lr=lr,
-                        momentum=0.9,
-                        weight_decay=weight_decay)
-    else:
-        opt = optim.RMSprop(parameters,
-                            lr=lr,
-                            weight_decay=weight_decay)
+def init_optimizer(optimizer_cfg, model):
+    """
+    optimizer_cfg keys (all optional except lr/weight_decay/optim_type):
+      - optim_type: 'AdamW' | 'Adam' | 'SGD' | 'RMSprop' | 'Adadelta'
+      - lr: float
+      - weight_decay: float
+      - momentum: float (SGD, RMSprop)
+      - nesterov: bool (SGD)
+      - beta1, beta2, eps: floats (Adam/AdamW)
+      - alpha: float (RMSprop)
+      - centered: bool (RMSprop)
+      - rho, eps: floats (Adadelta)
+    """
+    params = model.parameters()
+    opt_type = optimizer_cfg.get('optim_type', 'AdamW')
+    lr = float(optimizer_cfg.get('lr', 1e-3))
+    wd = float(optimizer_cfg.get('weight_decay', 0.0))
 
-    assert opt != None, 'Optimizer Not Initialized'
-    return opt
+    if opt_type == 'SGD':
+        momentum = float(optimizer_cfg.get('momentum', 0.9))
+        nesterov = bool(optimizer_cfg.get('nesterov', False))
+        return optim.SGD(
+            params, lr=lr, momentum=momentum, nesterov=nesterov, weight_decay=wd
+        )
+
+    elif opt_type == 'AdamW':
+        beta1 = float(optimizer_cfg.get('beta1', 0.9))
+        beta2 = float(optimizer_cfg.get('beta2', 0.999))
+        eps   = float(optimizer_cfg.get('eps', 1e-8))
+        return optim.AdamW(
+            params, lr=lr, betas=(beta1, beta2), eps=eps, weight_decay=wd
+        )
+
+    elif opt_type == 'Adam':
+        beta1 = float(optimizer_cfg.get('beta1', 0.9))
+        beta2 = float(optimizer_cfg.get('beta2', 0.999))
+        eps   = float(optimizer_cfg.get('eps', 1e-8))
+        return optim.Adam(
+            params, lr=lr, betas=(beta1, beta2), eps=eps, weight_decay=wd
+        )
+
+    elif opt_type == 'RMSprop':
+        alpha    = float(optimizer_cfg.get('alpha', 0.99))
+        momentum = float(optimizer_cfg.get('momentum', 0.0))
+        centered = bool(optimizer_cfg.get('centered', False))
+        return optim.RMSprop(
+            params, lr=lr, alpha=alpha, momentum=momentum,
+            centered=centered, weight_decay=wd
+        )
+
+    elif opt_type == 'Adadelta':
+        rho = float(optimizer_cfg.get('rho', 0.9))
+        eps = float(optimizer_cfg.get('eps', 1e-6))
+        return optim.Adadelta(
+            params, lr=lr, rho=rho, eps=eps, weight_decay=wd
+        )
+
+    else:
+        raise ValueError(f"Unknown optim_type: {opt_type}")
+
