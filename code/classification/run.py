@@ -40,7 +40,7 @@ parser.add_argument('--patience', type=int, default=15, help='early stopping pat
 
 
 # Optimizer
-parser.add_argument('--optim_type', default='Adam', help='optimizer used for training', choices=['Adam', 'Adadelta', 'RMSprop', 'SGD'])
+parser.add_argument('--optim_type', default='Adam', help='optimizer used for training', choices=['Adam', 'Adadelta', 'RMSprop', 'SGD', 'AdamW'])
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate for optimzer')
 parser.add_argument('--weight_decay', type=float, default=0.01, help='weight decay for optimizer')
 parser.add_argument('--weighted_loss', action='store_true', help='weighted loss')
