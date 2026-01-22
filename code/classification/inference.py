@@ -4,6 +4,7 @@ import glob
 import argparse
 import numpy as np
 import pandas as pd
+import sys
 
 from PIL import Image
 from pathlib import Path
@@ -15,7 +16,6 @@ from sklearn.metrics import confusion_matrix, f1_score
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as tvtrans
-
 
 np.random.seed(2020)
 
@@ -68,19 +68,163 @@ def load_dir(dataset_para):
     return images, image_filename_list, labels
 
 
-def pred_img(img, model):
+import numpy as np
+from sklearn.metrics import f1_score, confusion_matrix
+
+
+def cache_dual_head_probs(images, labels_1d, model, test_transform, device, amp_enabled: bool):
+    p_inf_all = np.zeros(len(images), dtype=np.float32)
+    p_spor_all = np.full(len(images), np.nan, dtype=np.float32)  # nan if no spor head
+    y_true = labels_1d.astype(np.int64, copy=False)
+
+    model.eval()
+    with torch.no_grad():
+        for i in range(len(images)):
+            cur_img = images[i]
+            if isinstance(cur_img, np.ndarray) and cur_img.ndim == 2:
+                cur_img = np.stack([cur_img] * 3, axis=-1)
+
+            x = test_transform(cur_img).unsqueeze(0).to(device)
+
+            if amp_enabled:
+                with torch.amp.autocast(device_type=device.type, enabled=True):
+                    logits = model(x)
+            else:
+                logits = model(x)
+
+            probs = torch.sigmoid(logits).detach().cpu().numpy()  # (1,H)
+            p_inf_all[i] = float(probs[0, 0])
+            if probs.shape[1] >= 2:
+                p_spor_all[i] = float(probs[0, 1])
+
+    return y_true, p_inf_all, p_spor_all
+
+
+def predict_from_thresholds(p_inf, p_spor, down_th, up_th, spor_th, inf_gate,
+                            dpi_gt5_prefer_spor=True):
     """
-        Get predicted image class and prob using well-trained model
-    Args:
-        img: PIL image or np.ndarray
+    Returns:
+      y_pred (int array)
+      discard_mask (bool array) where p_inf is in (down_th, up_th)
     """
+    n = len(p_inf)
+    y_pred = np.zeros(n, dtype=np.int64)
+    discard = (p_inf > down_th) & (p_inf < up_th)
 
-    out = model(img)
+    # start with clear
+    y_pred[p_inf <= down_th] = 0
 
-    pred = torch.argmax(out, axis=1)
-    prob = F.softmax(out, dim=1)
+    # candidate infected region
+    infected_region = (p_inf >= up_th)
+    y_pred[infected_region] = 1
 
-    return pred, prob
+    # spor call: only where spor head exists (not nan), p_inf passes gate, p_spor passes threshold
+    has_spor = ~np.isnan(p_spor)
+    spor_region = has_spor & (p_inf > inf_gate) & (p_spor >= spor_th)
+
+    # apply precedence
+    if dpi_gt5_prefer_spor:
+        # spor overrides infected if both true
+        y_pred[spor_region] = 2
+    else:
+        # infected wins if infected_region; spor only where not confidently infected
+        y_pred[spor_region & ~infected_region] = 2
+
+    # discard zone: keep label 0 placeholder (or whatever), but mark discard so caller can ignore
+    y_pred[discard] = 0
+
+    return y_pred, discard
+
+
+def score_predictions(y_true, y_pred, discard_mask=None,
+                      ignore_discard=False, collapse_spor_to_infected=False):
+    yt = y_true.copy()
+    yp = y_pred.copy()
+
+    if collapse_spor_to_infected:
+        yt = np.where(yt == 2, 1, yt)
+        yp = np.where(yp == 2, 1, yp)
+
+    if ignore_discard and discard_mask is not None:
+        keep = ~discard_mask
+        yt = yt[keep]
+        yp = yp[keep]
+
+    # choose labels based on what’s present after collapse
+    labels = sorted(np.unique(np.concatenate([yt, yp])))
+    macro_f1 = f1_score(yt, yp, average="macro") if len(labels) > 1 else 0.0
+    cm = confusion_matrix(yt, yp, labels=labels)
+
+    return macro_f1, cm, labels
+
+
+def grid_search_thresholds(y_true, p_inf, p_spor,
+                           down_grid, up_grid, spor_grid, gate_grid,
+                           ignore_discard=True,
+                           collapse_spor_to_infected=False,
+                           dpi_gt5_prefer_spor=True,
+                           top_k=25):
+    results = []
+    for down_th in down_grid:
+        for up_th in up_grid:
+            if up_th <= down_th:
+                continue
+
+            for spor_th in spor_grid:
+                for inf_gate in gate_grid:
+                    y_pred, discard = predict_from_thresholds(
+                        p_inf, p_spor,
+                        down_th=down_th, up_th=up_th,
+                        spor_th=spor_th, inf_gate=inf_gate,
+                        dpi_gt5_prefer_spor=dpi_gt5_prefer_spor
+                    )
+
+                    macro_f1, cm, labels = score_predictions(
+                        y_true, y_pred, discard_mask=discard,
+                        ignore_discard=ignore_discard,
+                        collapse_spor_to_infected=collapse_spor_to_infected
+                    )
+
+                    results.append((macro_f1, down_th, up_th, spor_th, inf_gate, cm, labels))
+
+    results.sort(key=lambda x: x[0], reverse=True)
+    return results[:top_k]
+
+
+def pred_img(img, model, dual_head: bool, use_autocast: bool = False):
+    """
+    Returns:
+      - pred_label (int)
+      - probs (torch.Tensor):
+           * softmax mode: (1,2) probs for classes [clear, infected]
+           * dual_head mode: (1,H) sigmoid probs for heads [infected,(spor)]
+      - extra (dict): contains p_inf, p_spor (if dual_head), and optional "discard" flag
+    """
+    extra = {}
+
+    if use_autocast:
+        # caller should wrap autocast context; keep function simple
+        logits = model(img)
+    else:
+        logits = model(img)
+
+    if not dual_head:
+        # old binary: logits (1,2)
+        probs = F.softmax(logits, dim=1)
+        pred = int(torch.argmax(probs, dim=1).item())
+        return pred, probs, extra
+
+    # dual-head: logits (1,1) or (1,2)
+    probs = torch.sigmoid(logits)
+    p_inf = float(probs[0, 0].item())
+    p_spor = float(probs[0, 1].item()) if probs.shape[1] >= 2 else None
+
+    extra["p_inf"] = p_inf
+    extra["p_spor"] = p_spor
+
+    # label is decided OUTSIDE using thresholds (so inference loop can apply dpi logic if desired)
+    # Here we just return a placeholder pred (0), actual pred computed in loop
+    return 0, probs, extra
 
 
 def categorize(pred, true, idx, t_p, t_n, f_p, f_n):
@@ -121,6 +265,7 @@ def _default_class_name_map(num_classes: int) -> dict[int, str]:
     if num_classes == 3:
         return {0: "clear", 1: "infected", 2: "conidiophores"}
     return {i: f"class_{i}" for i in range(num_classes)}
+
 
 def save_misclassified_montage(misclassified, class_name_map, out_path, n=10, seed=2020, overlay=True):
     if len(misclassified) == 0:
@@ -213,6 +358,7 @@ if __name__ == "__main__":
     parser.add_argument('--img_folder', type=str, default='images', help='image folder')
     parser.add_argument('--dataset_path', type=str, required=True, help='path to data')
     parser.add_argument('--model_path', type=str, required=True, help='path to model')
+    parser.add_argument('--collapse_spor_to_infected', action='store_true')
 
     # Better CLI pattern: flags should be store_true/store_false, not type=bool
     parser.add_argument('--HDF5', action='store_true', help='load from HDF5 (if omitted, loads from image directory)')
@@ -236,6 +382,21 @@ if __name__ == "__main__":
 
     # Optional: quick toggle for AMP during inference (mostly helpful on CUDA)
     parser.add_argument('--amp', action='store_true', help='enable autocast during inference (CUDA/MPS)')
+
+    parser.add_argument('--dual_head', action='store_true',
+                        help='If set: interpret model outputs as sigmoid heads (infected[, spor]). '
+                             'If not set: interpret outputs as softmax classes (clear vs infected).')
+    parser.add_argument('--grid_search', action='store_true', help='perform a grid search on threshold values')
+    parser.add_argument('--up_threshold', type=float, default=0.7,
+                        help='infected threshold for p_inf when dual_head')
+    parser.add_argument('--down_threshold', type=float, default=0.1,
+                        help='clear threshold for p_inf when dual_head')
+    parser.add_argument('--spor_th', type=float, default=None,
+                        help='sporulation threshold for p_spor (dual_head). Defaults to up_threshold.')
+    parser.add_argument('--inf_gate', type=float, default=None,
+                        help='minimum p_inf required to allow sporulation call (dual_head). Defaults to down_threshold.')
+    parser.add_argument('--ignore_discard', action='store_true',
+                        help='If set (dual_head only), discard samples are excluded from metrics.')
 
     opt = parser.parse_args()
 
@@ -265,7 +426,7 @@ if __name__ == "__main__":
             dataset_root_path = dataset_root_path / 'segmentation' / 'cls_dataset' / f'cv{opt.cv_seg_dataset}'
             subfolder_name = f'cross_validation/seg_dataset_{opt.cv_seg_dataset}'
     else:  # test
-        test_filepath = 'test_set.hdf5'
+        test_filepath = 'test.hdf5'
 
     output_folder = output_folder / subfolder_name / opt.group / opt.model_type
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -321,7 +482,11 @@ if __name__ == "__main__":
     META_COL_NAMES = ['id', 'predicted class', 'true class', 'status']
     rows = []  # collect dicts/rows and build DataFrame once
 
-    num_classes = int(opt.outdim)
+    if opt.dual_head:
+        num_classes = 3
+    else:
+        num_classes = 2
+
     class_name_map = _default_class_name_map(num_classes)
 
     # Metrics accumulators
@@ -332,56 +497,155 @@ if __name__ == "__main__":
     f_n, f_p, t_n, t_p = [], [], [], []
     misclassified = []  # list of dicts: {idx, img, true, pred}
 
+    amp_enabled = bool(opt.amp) and (device.type == "cuda")
+
+    if opt.dual_head:
+        if opt.grid_search:
+            print("Caching dual-head probabilities once...")
+            y_true, p_inf, p_spor = cache_dual_head_probs(
+                images=images,
+                labels_1d=labels_1d,
+                model=model,
+                test_transform=test_transform,
+                device=device,
+                amp_enabled=amp_enabled
+            )
+
+            print("Running grid search...")
+            down_grid = np.round(np.linspace(0.05, 0.25, 5), 2)
+            up_grid = np.round(np.linspace(0.50, 0.85, 8), 2)
+            spor_grid = np.round(np.linspace(0.50, 0.90, 9), 2)
+            gate_grid = np.round(np.linspace(0.20, 0.60, 5), 2)
+
+            top = grid_search_thresholds(
+                y_true=y_true,
+                p_inf=p_inf,
+                p_spor=p_spor,
+                down_grid=down_grid,
+                up_grid=up_grid,
+                spor_grid=spor_grid,
+                gate_grid=gate_grid,
+                ignore_discard=opt.ignore_discard,
+                collapse_spor_to_infected=opt.collapse_spor_to_infected,
+                dpi_gt5_prefer_spor=True,
+                top_k=20
+            )
+
+            best = top[0]
+            macro_f1, down_th, up_th, spor_th, inf_gate, cm, labels = best
+
+            print("\n===== BEST THRESHOLDS =====")
+            print(f"Macro F1: {macro_f1:.4f}")
+            print(f"down_th={down_th}, up_th={up_th}, spor_th={spor_th}, inf_gate={inf_gate}")
+            print("labels:", labels)
+            print("confusion matrix:\n", cm)
+
+            sys.exit(0)
+
     print("INFERENCE START")
 
     correct_counts = 0
     total_counts = int(images.shape[0])
 
-    amp_enabled = bool(opt.amp) and (device.type == "cuda")
+    # thresholds (compute once)
+    up_th = float(opt.up_threshold)
+    down_th = float(opt.down_threshold)
+    spor_th = float(opt.spor_th) if opt.spor_th is not None else up_th
+    inf_gate = float(opt.inf_gate) if opt.inf_gate is not None else down_th
+
+    # Reset accumulators (ensure empty before loop)
+    y_true = []
+    y_pred = []
+    rows = []
+    misclassified = []
+    correct_counts = 0
 
     with torch.no_grad():
         for idx in range(total_counts):
             cur_img = images[idx]
 
-            # Some datasets might store grayscale; ensure 3 channels if needed (optional).
-            # If you know all images are RGB already, you can remove this.
+            # grayscale -> fake RGB if needed
             if isinstance(cur_img, np.ndarray) and cur_img.ndim == 2:
                 cur_img = np.stack([cur_img] * 3, axis=-1)
 
             preproc_img = test_transform(cur_img).unsqueeze(0).to(device)
-
             true_label = int(labels_1d[idx])
-            y_true.append(true_label)
 
-            # Inference (optional autocast)
+            # forward
             if amp_enabled:
                 with torch.amp.autocast(device_type=device.type, enabled=True):
-                    pred_t, prob_t = pred_img(preproc_img, model)
+                    _, prob_t, extra = pred_img(preproc_img, model, dual_head=opt.dual_head)
             else:
-                pred_t, prob_t = pred_img(preproc_img, model)
+                _, prob_t, extra = pred_img(preproc_img, model, dual_head=opt.dual_head)
 
-            pred_label = int(pred_t.cpu().item())
+            discard = False
+            pred_probs_for_reporting = None
+            true_prob_for_reporting = None
+
+            if not opt.dual_head:
+                # softmax binary -> predicted class 0/1
+                pred_label = int(torch.argmax(prob_t, dim=1).item())
+                pred_probs_for_reporting = float(prob_t[0, pred_label].detach().cpu().item())
+                true_prob_for_reporting = float(prob_t[0, true_label].detach().cpu().item())
+
+            else:
+                # sigmoid heads -> thresholds -> map to 0/1/2
+                p_inf = float(extra["p_inf"])
+                p_spor = float(extra["p_spor"]) if extra.get("p_spor") is not None else None
+
+                if p_inf <= down_th:
+                    pred_label = 0  # clear
+                elif p_inf >= up_th:
+                    pred_label = 2 if (p_spor is not None and p_inf > inf_gate and p_spor >= spor_th) else 1
+                else:
+                    discard = True
+                    pred_label = 0  # placeholder label for “discard band”
+
+                if opt.ignore_discard and discard:
+                    continue
+
+                # reporting probs for montage
+                if pred_label == 0:
+                    pred_probs_for_reporting = 1.0 - p_inf
+                elif pred_label == 1:
+                    pred_probs_for_reporting = p_inf
+                else:
+                    pred_probs_for_reporting = p_spor if p_spor is not None else float("nan")
+
+                if true_label == 0:
+                    true_prob_for_reporting = 1.0 - p_inf
+                elif true_label == 1:
+                    true_prob_for_reporting = p_inf
+                else:
+                    true_prob_for_reporting = p_spor if p_spor is not None else float("nan")
+
+            # collapse (if requested) BEFORE metrics/rows
+            if opt.collapse_spor_to_infected:
+                if pred_label == 2:
+                    pred_label = 1
+                if true_label == 2:
+                    true_label = 1
+
+            # bookkeeping
+            y_true.append(true_label)
             y_pred.append(pred_label)
 
             correct = (pred_label == true_label)
             correct_counts += int(correct)
 
-            pred_prob = float(prob_t.squeeze(0)[pred_label].detach().cpu().item())
-            true_prob = float(prob_t.squeeze(0)[true_label].detach().cpu().item())
-
+            # misclassified
             if pred_label != true_label:
-                # store the raw image for plotting (uint8 HWC)
                 misclassified.append({
                     "idx": idx,
                     "img": cur_img,
                     "true": true_label,
                     "pred": pred_label,
-                    "pred_prob": pred_prob,
-                    "true_prob": true_prob,
+                    "pred_prob": pred_probs_for_reporting,
+                    "true_prob": true_prob_for_reporting,
                 })
 
-            # status + confusion breakdown
-            if num_classes == 2:
+            # status + rows
+            if (not opt.dual_head) and num_classes == 2:
                 status = categorize(pred_label, true_label, idx, t_p, t_n, f_p, f_n)
             else:
                 status = "Correct" if correct else "Incorrect"
@@ -392,6 +656,10 @@ if __name__ == "__main__":
                 "true class": class_name_map.get(true_label, str(true_label)),
                 "status": status
             })
+
+            # optional: progress print every so often
+            if (idx + 1) % 500 == 0:
+                print(f"Processed {idx + 1}/{total_counts}")
 
     # Build dataframe once (fast)
     pred_df = pd.DataFrame(rows, columns=META_COL_NAMES)
@@ -420,7 +688,7 @@ if __name__ == "__main__":
     print(f'Saved CSV: {csv_path}')
 
     # Optional binary breakdown
-    if num_classes == 2:
+    if not opt.dual_head:
         infected_counts = int((labels_1d == 1).sum())
         clear_counts = int((labels_1d == 0).sum())
         print(f'Clear: {clear_counts} | Infected: {infected_counts}')
@@ -432,5 +700,5 @@ if __name__ == "__main__":
             class_name_map=class_name_map,
             out_path=montage_path,
             n=opt.n_misclassified,
-            seed=2030
+            seed=2031
         )
