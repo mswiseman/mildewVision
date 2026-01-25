@@ -100,6 +100,38 @@ def cache_dual_head_probs(images, labels_1d, model, test_transform, device, amp_
     return y_true, p_inf_all, p_spor_all
 
 
+def cache_softmax_probs(images, labels_1d, model, test_transform, device, amp_enabled: bool):
+    """
+    For non-dual-head softmax binary models:
+      p_inf = P(class 1 = infected)
+      p_spor = all NaN (unused)
+    """
+    p_inf_all = np.zeros(len(images), dtype=np.float32)
+    p_spor_all = np.full(len(images), np.nan, dtype=np.float32)
+    y_true = labels_1d.astype(np.int64, copy=False)
+
+    model.eval()
+    with torch.no_grad():
+        for i in range(len(images)):
+            cur_img = images[i]
+            if isinstance(cur_img, np.ndarray) and cur_img.ndim == 2:
+                cur_img = np.stack([cur_img] * 3, axis=-1)
+
+            x = test_transform(cur_img).unsqueeze(0).to(device)
+
+            if amp_enabled:
+                with torch.amp.autocast(device_type=device.type, enabled=True):
+                    logits = model(x)
+            else:
+                logits = model(x)
+
+            probs = F.softmax(logits, dim=1).detach().cpu().numpy()  # (1,2)
+            # infected prob assumed index 1
+            p_inf_all[i] = float(probs[0, 1])
+
+    return y_true, p_inf_all, p_spor_all
+
+
 def predict_from_thresholds(p_inf, p_spor, down_th, up_th, spor_th, inf_gate,
                             dpi_gt5_prefer_spor=True):
     """
@@ -136,6 +168,28 @@ def predict_from_thresholds(p_inf, p_spor, down_th, up_th, spor_th, inf_gate,
     return y_pred, discard
 
 
+def detect_softmax_outdim(model, sample_img_tensor, device, amp_enabled: bool) -> int:
+    model.eval()
+    with torch.no_grad():
+        if amp_enabled:
+            with torch.amp.autocast(device_type=device.type, enabled=True):
+                logits = model(sample_img_tensor.to(device))
+        else:
+            logits = model(sample_img_tensor.to(device))
+    if logits.ndim != 2 or logits.shape[0] != 1:
+        raise ValueError(f"Unexpected logits shape: {tuple(logits.shape)}")
+    return int(logits.shape[1])
+
+
+def collapse_test_labels_if_needed(labels_1d: np.ndarray, model_outdim: int) -> np.ndarray:
+    present = np.unique(labels_1d)
+    test_num_classes = len(present)
+    if test_num_classes == 3 and model_outdim == 2:
+        # collapse class 2 into class 1 (infected)
+        return np.where(labels_1d == 2, 1, labels_1d)
+    return labels_1d
+
+
 def score_predictions(y_true, y_pred, discard_mask=None,
                       ignore_discard=False, collapse_spor_to_infected=False):
     yt = y_true.copy()
@@ -158,20 +212,36 @@ def score_predictions(y_true, y_pred, discard_mask=None,
     return macro_f1, cm, labels
 
 
-def grid_search_thresholds(y_true, p_inf, p_spor,
-                           down_grid, up_grid, spor_grid, gate_grid,
-                           ignore_discard=True,
-                           collapse_spor_to_infected=False,
-                           dpi_gt5_prefer_spor=True,
-                           top_k=25):
+def grid_search_thresholds(
+        y_true, p_inf, p_spor,
+        down_grid, up_grid,
+        spor_grid=None, gate_grid=None,
+        dual_head=False,
+        ignore_discard=True,
+        collapse_spor_to_infected=False,
+        dpi_gt5_prefer_spor=True,
+        top_k=25,
+        default_spor_th=0.8,
+        default_inf_gate=0.3
+):
     results = []
+
     for down_th in down_grid:
         for up_th in up_grid:
             if up_th <= down_th:
                 continue
 
-            for spor_th in spor_grid:
-                for inf_gate in gate_grid:
+            # If NOT dual head: run once using default values
+            if not dual_head:
+                spor_values = [default_spor_th]
+                gate_values = [default_inf_gate]
+            else:
+                # If dual head: loop over full grids
+                spor_values = spor_grid
+                gate_values = gate_grid
+
+            for spor_th in spor_values:
+                for inf_gate in gate_values:
                     y_pred, discard = predict_from_thresholds(
                         p_inf, p_spor,
                         down_th=down_th, up_th=up_th,
@@ -185,7 +255,9 @@ def grid_search_thresholds(y_true, p_inf, p_spor,
                         collapse_spor_to_infected=collapse_spor_to_infected
                     )
 
-                    results.append((macro_f1, down_th, up_th, spor_th, inf_gate, cm, labels))
+                    results.append(
+                        (macro_f1, down_th, up_th, spor_th, inf_gate, cm, labels)
+                    )
 
     results.sort(key=lambda x: x[0], reverse=True)
     return results[:top_k]
@@ -426,7 +498,7 @@ if __name__ == "__main__":
             dataset_root_path = dataset_root_path / 'segmentation' / 'cls_dataset' / f'cv{opt.cv_seg_dataset}'
             subfolder_name = f'cross_validation/seg_dataset_{opt.cv_seg_dataset}'
     else:  # test
-        test_filepath = 'test.hdf5'
+        test_filepath = 'testv2.hdf5'
 
     output_folder = output_folder / subfolder_name / opt.group / opt.model_type
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -477,6 +549,29 @@ if __name__ == "__main__":
 
     model = model.to(device)
     print(f"Using device: {device}")
+    amp_enabled = bool(opt.amp) and (device.type == "cuda")
+
+    present_before = sorted(np.unique(labels_1d).tolist())
+    test_num_classes = len(present_before)
+
+    # build one sample tensor to probe model output dim
+    sample_img = images[0]
+    if isinstance(sample_img, np.ndarray) and sample_img.ndim == 2:
+        sample_img = np.stack([sample_img] * 3, axis=-1)
+    sample_x = test_transform(sample_img).unsqueeze(0)
+
+    model_outdim = detect_softmax_outdim(model, sample_x, device, amp_enabled=amp_enabled)
+
+    if not opt.dual_head and model_outdim != test_num_classes:
+        print(f"[Class check] test labels present: {present_before} (n={test_num_classes})")
+        print(f"[Class check] model softmax outdim: {model_outdim}")
+
+
+        labels_1d = collapse_test_labels_if_needed(labels_1d, model_outdim)
+
+        present_after = sorted(np.unique(labels_1d).tolist())
+        if present_after != present_before:
+            print(f"[Class check] Collapsed test labels: {present_before} -> {present_after} (collapsed 2 into 1)")
 
     # --- Output records ---
     META_COL_NAMES = ['id', 'predicted class', 'true class', 'status']
@@ -485,7 +580,7 @@ if __name__ == "__main__":
     if opt.dual_head:
         num_classes = 3
     else:
-        num_classes = 2
+        num_classes = model_outdim
 
     class_name_map = _default_class_name_map(num_classes)
 
@@ -497,10 +592,8 @@ if __name__ == "__main__":
     f_n, f_p, t_n, t_p = [], [], [], []
     misclassified = []  # list of dicts: {idx, img, true, pred}
 
-    amp_enabled = bool(opt.amp) and (device.type == "cuda")
-
-    if opt.dual_head:
-        if opt.grid_search:
+    if opt.grid_search:
+        if opt.dual_head:
             print("Caching dual-head probabilities once...")
             y_true, p_inf, p_spor = cache_dual_head_probs(
                 images=images,
@@ -510,45 +603,65 @@ if __name__ == "__main__":
                 device=device,
                 amp_enabled=amp_enabled
             )
-
-            print("Running grid search...")
-            down_grid = np.round(np.linspace(0.05, 0.25, 5), 2)
-            up_grid = np.round(np.linspace(0.50, 0.85, 8), 2)
-            spor_grid = np.round(np.linspace(0.50, 0.90, 9), 2)
-            gate_grid = np.round(np.linspace(0.20, 0.60, 5), 2)
-
-            top = grid_search_thresholds(
-                y_true=y_true,
-                p_inf=p_inf,
-                p_spor=p_spor,
-                down_grid=down_grid,
-                up_grid=up_grid,
-                spor_grid=spor_grid,
-                gate_grid=gate_grid,
-                ignore_discard=opt.ignore_discard,
-                collapse_spor_to_infected=opt.collapse_spor_to_infected,
-                dpi_gt5_prefer_spor=True,
-                top_k=20
+        else:
+            print("Caching softmax probabilities once...")
+            y_true, p_inf, p_spor = cache_softmax_probs(
+                images=images,
+                labels_1d=labels_1d,
+                model=model,
+                test_transform=test_transform,
+                device=device,
+                amp_enabled=amp_enabled
             )
 
-            best = top[0]
-            macro_f1, down_th, up_th, spor_th, inf_gate, cm, labels = best
+        print("Running grid search...")
+        down_grid = np.round(np.linspace(0.05, 0.35, 5), 2)
+        up_grid = np.round(np.linspace(0.50, 0.95, 8), 2)
 
-            print("\n===== BEST THRESHOLDS =====")
+        # Only needed/used when dual_head=True; safe to define always
+        spor_grid = np.round(np.linspace(0.50, 0.90, 9), 2)
+        gate_grid = np.round(np.linspace(0.20, 0.60, 5), 2)
+
+        top = grid_search_thresholds(
+            y_true=y_true,
+            p_inf=p_inf,
+            p_spor=p_spor,  # NaNs if not dual_head
+            down_grid=down_grid,
+            up_grid=up_grid,
+            spor_grid=spor_grid,
+            gate_grid=gate_grid,
+            dual_head=opt.dual_head,
+            ignore_discard=opt.ignore_discard,
+            collapse_spor_to_infected=opt.collapse_spor_to_infected,
+            dpi_gt5_prefer_spor=True,
+            top_k=20,
+            default_spor_th=0.8,
+            default_inf_gate=0.3
+        )
+
+        print("\n===== TOP 5 THRESHOLD SETTINGS =====")
+
+        for rank, res in enumerate(top[:5], start=1):
+            macro_f1, down_th, up_th, spor_th, inf_gate, cm, labels = res
+
+            print(f"\n--- Rank {rank} ---")
             print(f"Macro F1: {macro_f1:.4f}")
-            print(f"down_th={down_th}, up_th={up_th}, spor_th={spor_th}, inf_gate={inf_gate}")
+            print(
+                f"down_th={down_th}, up_th={up_th}"
+                + (f", spor_th={spor_th}, inf_gate={inf_gate}" if opt.dual_head else "")
+            )
             print("labels:", labels)
             print("confusion matrix:\n", cm)
 
-            sys.exit(0)
+        sys.exit(0)
 
     print("INFERENCE START")
 
-    correct_counts = 0
-    total_counts = int(images.shape[0])
+    total_counts = int(images.shape[0])  # stays constant
 
     # thresholds (compute once)
     up_th = float(opt.up_threshold)
+    down_th = float(opt.down_threshold)
     down_th = float(opt.down_threshold)
     spor_th = float(opt.spor_th) if opt.spor_th is not None else up_th
     inf_gate = float(opt.inf_gate) if opt.inf_gate is not None else down_th
@@ -669,7 +782,8 @@ if __name__ == "__main__":
     pred_df.to_csv(csv_path, index=False)
 
     # --- Summary metrics ---
-    accuracy = 100.0 * correct_counts / max(total_counts, 1)
+    evaluated_counts = len(y_true)
+    accuracy = 100.0 * correct_counts / max(evaluated_counts, 1)
 
     cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
     f1 = f1_score(y_true, y_pred, average='macro') * 100.0
@@ -683,7 +797,8 @@ if __name__ == "__main__":
         title=f'Confusion Matrix\nOverall Accuracy: {accuracy:.6f}%\nMacro F1: {f1:.6f}%'
     )
 
-    print(f'Accuracy on {total_counts} {opt.set} images: {accuracy:.6f}%')
+    print(f'Accuracy on {evaluated_counts} {opt.set} images: {accuracy:.6f}%')
+    print(f'(Discarded: {total_counts - evaluated_counts})')
     print(f'Macro F1: {f1:.6f}%')
     print(f'Saved CSV: {csv_path}')
 
