@@ -13,8 +13,8 @@ python ../segmentation/infer_from_folder.py                                     
     --model_path        "../.."                                                                       \
     --cuda                                                                                            \
     --cuda_id           0                                                                             \
-    --patch_folder      "../../data/segmentation/test_set/images"                                     \
-    --out_mask_folder   "../../results/segmentation/test_set/masks"
+    --patch_folder      "../../data/segmentation/test/images"                                     \
+    --out_mask_folder   "../../results/segmentation/test/masks"
 
 
 python ../segmentation/infer_full_leaf_seg.py                                                         \
