@@ -9,7 +9,7 @@ python ../segmentation/infer_from_folder.py                                     
     --model_type        DeepLab                                                                       \
     --loading_epoch     60                                                                            \
     --pretrained                                                                                      \
-    --timestamp         Feb04_00-32-07_2021                                                           \
+    --timestamp         Feb04_00-32-07_2026                                                           \
     --model_path        "../.."                                                                       \
     --cuda                                                                                            \
     --cuda_id           0                                                                             \
@@ -21,7 +21,7 @@ python ../segmentation/infer_from_folder.py                                     
     --model_type        DeepLab                                                                       \
     --loading_epoch     60                                                                            \
     --pretrained                                                                                      \
-    --timestamp         Feb04_00-32-07_2021                                                           \
+    --timestamp         Feb04_00-32-07_2026                                                           \
     --model_path        "../.."                                                                       \
     --cuda                                                                                            \
     --cuda_id           0                                                                             \
