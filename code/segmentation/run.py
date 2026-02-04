@@ -9,7 +9,7 @@ import tensorboard
 
 import dill
 import pickle
-
+from datetime import datetime
 
 from utils import (getTimestamp, getHostName, makeSubdir,
                     logInfoWithDot, printArgs, set_logging)
@@ -146,7 +146,7 @@ if __name__ == '__main__':
     nworker = opt.nworker
 
     # Model
-    year = '2021'
+    year = str(datetime.now().year)
     current_time = getTimestamp() if not opt.resume else opt.resume_timestamp
     model_type_time = opt.model_type + '_{0}_{1}'.format(current_time, year)
 
@@ -216,24 +216,6 @@ if __name__ == '__main__':
     # Log model, optim information
     printArgs(logger, vars(opt))
 
-    ## Preprocessing transforms: data augmentation
-    # 18000 samples
-    #  train mean (116.83, 156.61, 79.98) std (38.75, 34.61, 48.77)
-    #  val mean (116.05, 155.6, 78.77) std (38.31, 34.38, 48.1)
-
-    # train_augmentation = tvtrans.Compose([
-    #     tvtrans.ToPILImage(),
-    #     # tvtrans.RandomHorizontalFlip(p=0.5),
-    #     # tvtrans.RandomVerticalFlip(p=0.5),
-    #     # tvtrans.RandomAffine(degrees=(0, 180), translate=(0.05, 0.05), scale=(0.9, 1.1)),
-    #     tvtrans.ToTensor(),
-    #     tvtrans.Normalize((0.5, ), (0.5, ))
-    # ])
-    # test_transform = tvtrans.Compose([
-    #     # tvtrans.ToPILImage(),
-    #     tvtrans.ToTensor(),
-    #     tvtrans.Normalize((0.5, ), (0.5, ))
-    # ])
         
     # logger.info(train_augmentation)
 
@@ -276,3 +258,4 @@ if __name__ == '__main__':
 
     solver = HyphalSolver(model, dataloader, optimizer, scheduler, logger, writer)
     solver.forward(log_interval=50)
+
