@@ -1,0 +1,2 @@
+filename,stem,run_time,model_type,model_timestamp,epoch,rel_th,prob_th,min_area,step,batch_size,leaf_patch_min,pred_white_pixels,leaf_pixels,total_pixels,pct_infected_of_leaf,pct_infected_of_image,mask_path
+039-SYMPHONY_R1.png,039-SYMPHONY_R1,2026-02-04T12:20:09,DeepLab,Feb04_00-32-07_2026,60,0.2,0.7,200,112,8,0.05,9150086,38640339,45413508,23.6801,20.1484,..\..\results\segmentation\6-28-2023_10dpi-1\039-SYMPHONY_R1_leaf_pred.png
