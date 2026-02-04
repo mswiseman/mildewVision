@@ -49,21 +49,18 @@ def infer_folder(
             x = transform(rgb).unsqueeze(0).to(device)  # (1,3,H,W)
             preds = model(x)
 
-            logits = preds["out"]  # (1,C,H,W)
-
-            # For outdim=2 trained with CrossEntropyLoss
             logits = preds["out"]  # (1,2,H,W)
-            prob_fg = torch.softmax(logits, 1)[:, 1]  # (1,H,W)
-            mask = (prob_fg > 0.6).cpu().numpy().astype(np.uint8)  # try 0.5–0.8
+            prob_fg = torch.softmax(logits, dim=1)[:, 1]  # (1,H,W)
 
-            # Save as 0/255 PNG
-            mask_255 = (mask * 255).astype(np.uint8)
+            mask = (prob_fg[0] > 0.6).byte().cpu().numpy()  # (H,W) uint8 0/1
+            mask_255 = (mask * 255).astype(np.uint8)  # (H,W) uint8 0/255
+
             out_path = out_mask_folder / f"{p.stem}_pred.png"
             cv2.imwrite(str(out_path), mask_255)
 
             # Optional: save foreground probability map (for thresholding later)
             if save_probs and logits.shape[1] == 2:
-                probs = torch.softmax(logits, dim=1)[0, 1].cpu().numpy()  # foreground prob
+                probs = prob_fg[0].cpu().numpy()  # (H,W)
                 prob_path = out_mask_folder / f"{p.stem}_prob.png"
                 cv2.imwrite(str(prob_path), (probs * 255).astype(np.uint8))
 
