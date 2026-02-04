@@ -2,7 +2,7 @@
 
 # for running inference using segmentation
 # ../segmentation/infer_from_folder.py is mainly for testing performance on patches
-# ../segmentation/infer_from_folder.py is for inference on entire leaf disks
+# ../segmentation/infer_full_leaf_seg.py is for inference on entire leaf disks
 
 
 python ../segmentation/infer_from_folder.py                                                           \
@@ -14,10 +14,10 @@ python ../segmentation/infer_from_folder.py                                     
     --cuda                                                                                            \
     --cuda_id           0                                                                             \
     --patch_folder      "../../data/segmentation/test_set/images"                                     \
-    --out_mask_folder   "../../data/segmentation/test_set/masks"
+    --out_mask_folder   "../../results/segmentation/test_set/masks"
 
 
-python ../segmentation/infer_from_folder.py                                                           \
+python ../segmentation/infer_full_leaf_seg.py                                                         \
     --model_type        DeepLab                                                                       \
     --loading_epoch     60                                                                            \
     --pretrained                                                                                      \
