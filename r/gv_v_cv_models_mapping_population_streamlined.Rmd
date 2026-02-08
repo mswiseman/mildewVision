@@ -1,0 +1,2209 @@
+---
+title: "gv_v_cv_models_mapping_population_streamlined"
+author: "Michele Wiseman"
+date: "2026-02-06"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,          # Control whether code is shown in the output
+  fig.path = "figures/", # **Crucial: Specifies the directory for saving plots**
+  dpi = 300,            # Set resolution (e.g., for high-res images)
+  dev = "pdf",          # Set default device (e.g., "png", "jpeg", "pdf", "svg")
+  fig.width = 8,        # Set default width in inches
+  fig.height = 5        # Set default height in inches
+)
+  
+```
+
+## Libraries
+```{r, message=FALSE}
+
+# ---- Packages ----
+library(readxl)
+library(readr)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(DescTools)
+library(lme4)
+library(patchwork)
+library(caret)
+library(irr)
+library(scales)
+library(ggrepel)
+library(janitor)
+library(knitr)
+library(performance)
+library(tibble)
+```
+
+## Load data
+
+Change path if necessary
+```{r, warning=FALSE}
+bb_data_path <- "mapping_population_Jan26_26_model_data.csv"
+gh_path <- "2023 Multiparent PM Phenotyping project Datasheet.xlsx"
+bb_data_path_sal_optim <- "ResNet_upth095_downth03_Jan26_23-15-35_2026_Mapping_Population_Results.csv"
+
+# ----------------------------
+# 1) Read data
+# ----------------------------
+
+# bb data
+concatenated_df <- readr::read_csv(bb_data_path, show_col_types = FALSE)
+concatenated_df_sal_optim <- readr::read_csv(bb_data_path_sal_optim, show_col_types = FALSE)
+
+# gh data
+gh <- readxl::read_excel(gh_path)
+```
+
+
+```{r}
+########### Blackbird data ########### 
+
+# ----------------------------
+# Helpers
+# ----------------------------
+
+add_dpi <- function(df, clean_names = FALSE) {
+  if (clean_names) df <- janitor::clean_names(df)
+
+  df %>%
+    mutate(
+      dpi = str_extract(imaging_date, "(?<=_)\\d+(?=dpi)") |> as.integer(),
+      dpi = if_else(dpi == 9L, 10L, dpi),
+      dpi = factor(dpi),
+      filename = str_remove(filename, "_R[12]$")
+    ) %>%
+    filter(!is.na(dpi))
+}
+
+bb_common_clean <- function(
+  df,
+  threshold_col, threshold_value,
+  drop_cols = character(),
+  extra_mutate = NULL
+) {
+  df2 <- df %>%
+    mutate(
+      severity = as.numeric((hyphal_patches + conidiophore_patches) /
+                              (hyphal_patches + conidiophore_patches + clear_patches)),
+      total_patches = clear_patches + hyphal_patches + conidiophore_patches + discarded_patches,
+      discard_rate  = discarded_patches / total_patches,
+      sporulation_efficiency = sporulating_pct / severity,
+      sporulation_efficiency = if_else(is.nan(sporulation_efficiency), 0, sporulation_efficiency)
+    ) %>%
+    filter(total_patches > 0) %>%
+    filter(discard_rate < 0.15) %>%
+    filter(.data[[threshold_col]] == threshold_value) %>%
+    filter(!filename %in% c(
+      "347-SYMPHONY_R2_WET_APP",
+      "348-SYMPHONY_R2_WET_APP",
+      "349-SYMPHONY_R2_WET_APP",
+      "350-SYMPHONY_R2_WET_APP",
+      "SYMPHONY_R2_WET_APP"
+    ))
+
+  # do extra mutation BEFORE dropping source columns
+  if (!is.null(extra_mutate)) df2 <- extra_mutate(df2)
+
+  df2 %>%
+    dplyr::select(-any_of(drop_cols)) %>%
+    distinct()
+}
+
+# ----------------------------
+# Build the two BB datasets
+# ----------------------------
+
+# SAL-optimized BB
+bb2_sal_optim <- concatenated_df_sal_optim %>%
+  add_dpi(clean_names = TRUE) %>%
+  bb_common_clean(
+    threshold_col   = "grad_cam_spor_th",
+    threshold_value = 0.2,
+  ) %>%
+  mutate(identifier = conserved_identifier) %>%
+  dplyr::select(-severity_rate_patch, -conserved_identifier) %>% 
+  distinct()
+
+
+# Baseline BB
+bb2 <- concatenated_df %>%
+  add_dpi(clean_names = FALSE) %>%
+  bb_common_clean(
+    threshold_col   = "sal_threshold",
+    threshold_value = 0.5,
+    extra_mutate = function(d) {
+      d %>%
+        mutate(
+          gradient   = as.numeric(Gradient_sr2),
+          gradcam    = as.numeric(GradCAM_sr2),
+          smoothgrad = as.numeric(`Gradient-SG_sr2`),
+          identifier = conserved_identifier
+        )
+    },
+    drop_cols = c(
+      "Gradient-SG_sr2", "GradCAM_sr2", "Gradient_sr2",
+      "severity_rate_patch", "conserved_identifier"
+    )
+  ) %>% distinct()
+
+# Combine (fills missing cols with NA automatically)
+bb2_all <- bind_rows(bb2_sal_optim, bb2)
+
+
+```
+
+## Quick data visualations before proceeding
+
+```{r}
+
+########### Greenhouse data ########### 
+
+# Count number of unique greenhouse identifiers with at least 6 measurements for bine 1 and bine 2
+gh %>%
+  group_by(Identifier) %>%
+  summarise(
+    n_bine1 = sum(!is.na(`Bine 1 Colony counts`)),
+    n_bine2 = sum(!is.na(`Bine 2 Colony counts`))
+  ) %>%
+  filter(n_bine1 >= 6, n_bine2 >= 6)
+
+# Visualize phenotyping distribution in greenhouse data
+gh$`Bine 1 Colony counts` <- as.numeric(as.character(gh$`Bine 1 Colony counts`))
+
+ggplot(gh, aes(x = `Bine 1 Colony counts`)) +
+  geom_histogram(bins = 30) +
+  labs(x = "Bine 1 Colony counts", y = "Frequency") +
+  theme_classic()
+
+
+# Standardize ID
+gh_id_col <- "identifier" 
+
+# Your colony count columns
+count_cols <- c("Bine 1 Colony counts", "Bine 2 Colony counts")
+
+
+# Clean to numeric
+gh <- gh %>%
+  mutate(across(all_of(count_cols), ~ as.numeric(.x)))
+
+gh_clean <- gh %>%
+  janitor::clean_names() %>%
+  dplyr::select(
+    -reassessment_date,
+    -notes_14,
+    -re_bine_1_colony_counts,
+    -re_bine_2_colony_counts,
+    -rater_17,
+    -notes_18
+  ) 
+
+# convert to long continue cleaning names to make life easier
+gh_long <- gh_clean %>%
+  janitor::clean_names() %>%
+  pivot_longer(
+    cols = c(bine_1_colony_counts, bine_2_colony_counts),
+    names_to = "bine",
+    values_to = "colony_counts"
+  ) %>%
+  mutate(
+    bine = if_else(bine == "bine_1_colony_counts", 1L, 2L),
+    rater = rater_13
+  ) %>%
+  dplyr::select(-rater_13)
+
+# Make one number per identifier x timepoint
+# mean of transformed values per replicate
+gh_obs <- gh_long %>%
+  mutate(
+    colony_log = log1p(as.numeric(colony_counts))
+  ) %>%
+  group_by(inoculation_date, bench, identifier) %>%
+  summarise(
+    replicate_log = mean(colony_log, na.rm = TRUE),
+    rater = first(rater),     # <-- retain rater
+    n_obs = sum(!is.na(colony_log)),
+    .groups = "drop"
+  ) %>%
+  filter(n_obs > 0) %>%
+  dplyr::select(-n_obs) %>%
+  rename(replicate = bench) %>%
+  mutate(
+    replicate = factor(
+      replicate,
+      levels = c("A", "B"),
+      labels = c("1", "2")
+    )
+  ) %>%
+  group_by(inoculation_date, identifier) %>%
+  mutate(
+    n_reps_per_date = n()
+  ) %>%
+  ungroup()
+
+
+
+# do the same but without log (to compare) 
+gh_obs_no_log <- gh_long %>%
+  group_by(inoculation_date, bench, identifier) %>%
+  summarise(
+    replicate_mean_colony_counts = mean(colony_counts, na.rm = TRUE),
+    n_obs = sum(!is.na(replicate_mean_colony_counts)),
+    .groups = "drop"
+  ) %>%
+  filter(n_obs > 0) %>%
+  dplyr::select(-n_obs) %>%
+  rename(replicate = bench) %>%
+  mutate(
+    replicate = factor(
+      replicate,
+      levels = c("A", "B"),
+      labels = c("1", "2")
+    )
+  ) %>%
+  group_by(inoculation_date, identifier) %>%
+  mutate(
+    n_reps_per_date = n()
+  ) %>%
+  ungroup()
+
+# Line-level greenhouse mean
+gh_line <- gh_obs %>%
+  group_by(identifier) %>%
+  summarise(
+    gh_log1p_mean    = mean(replicate_log, na.rm = TRUE),
+    gh_n             = sum(!is.na(replicate_log)),
+    .groups = "drop"
+  )
+
+# Line-level greenhouse mean
+gh_line_no_log <- gh_obs_no_log %>%
+  group_by(identifier) %>%
+  summarise(
+    gh_rep_mean    = mean(replicate_mean_colony_counts, na.rm = TRUE),
+    gh_n             = sum(!is.na(replicate_mean_colony_counts)),
+    .groups = "drop"
+  )
+
+gh_line_plot <- gh_line %>%
+  mutate(
+    cross = str_extract(identifier, "^[^-]+")
+  ) %>%
+  filter(!is.na(cross), cross != "") %>%
+  filter(!is.na(gh_log1p_mean)) %>%
+  filter(cross %in% c("W2021006", "W2021009", "W2021010", "W2021011"))
+
+gh_line_no_log_plot <- gh_line_no_log %>%
+  mutate(
+    cross = str_extract(identifier, "^[^-]+")
+  ) %>%
+  filter(!is.na(cross), cross != "") %>%
+  filter(!is.na(gh_rep_mean)) %>%
+  filter(cross %in% c("W2021006", "W2021009", "W2021010", "W2021011"))
+
+
+# Visualize line-level greenhouse severity
+ggplot(gh_line_plot, aes(x = gh_log1p_mean)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30) +
+  geom_density() +
+  facet_wrap(~ cross, scales = "free_y") +
+  labs(
+    title = "Line-level greenhouse severity by cross",
+    x = "Line-level greenhouse severity (mean log1p colonies per rep)",
+    y = "Density"
+  ) +
+  theme_classic()
+
+# not log transformed
+ggplot(gh_line_no_log_plot, aes(x = gh_rep_mean)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30) +
+  geom_density() +
+  facet_wrap(~ cross, scales = "free_y") +
+  labs(
+    title = "Line-level greenhouse severity by cross",
+    x = "Line-level greenhouse severity (mean colonies per rep)",
+    y = "Density"
+  ) +
+  theme_classic()
+
+########### Blackbird data ########### 
+
+
+# Visualize distribution of blackbird-estimated disease severity faceted by 5 dpi and 10 dpi
+plot_df <- bb2 %>%
+  mutate(
+    # pull cross from conserved_identifier: everything before "-"
+    cross = str_extract(identifier, "^[^-]+"),
+    # standardize dpi for faceting
+    dpi = factor(as.character(dpi), levels = c("5", "10"))
+  ) %>%
+  filter(!is.na(cross), cross != "") %>%
+  filter(dpi %in% c("5", "10")) %>%
+  filter(!is.na(severity)) %>%
+  filter(cross %in% c("W2021006", "W2021009", "W2021010", "W2021011"))
+
+ggplot(plot_df, aes(x = severity)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30) +
+  geom_density() +
+  facet_grid(dpi ~ cross, scales = "free_y") +
+  labs(
+    title = "Blackbird-estimated disease severity by DPI and cross",
+    x = "Estimated disease severity",
+    y = "Density"
+  ) +
+  theme_classic()
+
+# log transformed
+ggplot(plot_df, aes(x = log1p(severity))) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30) +
+  geom_density() +
+  facet_grid(dpi ~ cross, scales = "free_y") +
+  labs(
+    title = "Blackbird-estimated disease severity by DPI and cross",
+    x = "Estimated disease severity (log1p)",
+    y = "Density"
+  ) +
+  theme_classic()
+
+```
+
+## Overlay distribution of phenotypes between GH and BB
+
+```{r}
+bb_10_line <- bb2 %>%
+  janitor::clean_names() %>%
+  mutate(
+    dpi = factor(as.character(dpi), levels = c("5","10")),
+    cross = str_extract(identifier, "^[^-]+"),
+  ) %>%
+  filter(dpi == "10") %>%
+  filter(!is.na(severity)) %>%
+  group_by(identifier) %>%
+  summarise(
+    bb_sev10_mean = mean(severity, na.rm = TRUE),
+    bb_n_images10 = sum(!is.na(severity)),
+    cross = first(cross),
+    .groups = "drop"
+  ) %>%
+  filter(cross %in% c("W2021006", "W2021009", "W2021010", "W2021011"))
+
+bb_gh_10 <- gh_line_plot %>%
+  inner_join(bb_10_line, by = c("identifier", "cross"))
+
+bb_gh_10_no_log <- gh_line_no_log_plot %>%
+  inner_join(bb_10_line, by = c("identifier", "cross"))
+
+
+########################################################
+# compare gh and bb severity at 10 dpi facet by pop    #
+########################################################
+
+# calc R2 for the regression below
+r2_df <- bb_gh_10 %>%
+  group_by(cross) %>%
+  do({
+    m <- lm(bb_sev10_mean ~ gh_log1p_mean, data = .)
+    tibble(
+      r2 = summary(m)$r.squared
+    )
+  })
+
+# make it pretty
+r2_df <- r2_df %>%
+  mutate(
+    label = paste0("R^2 = ", round(r2, 2))
+  )
+
+# calc R2 for the regression below
+r2_df_no_log <- bb_gh_10_no_log %>%
+  group_by(cross) %>%
+  do({
+    m <- lm(bb_sev10_mean ~ gh_rep_mean, data = .)
+    tibble(
+      r2 = summary(m)$r.squared
+    )
+  })
+
+# make it pretty
+r2_df_no_log <- r2_df_no_log %>%
+  mutate(
+    label = paste0("R^2 = ", round(r2, 2))
+  )
+
+# compare gh and bb severity at 10 dpi facet by pop
+ggplot(bb_gh_10, aes(x = gh_log1p_mean, y = bb_sev10_mean)) +
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ cross, scales = "free") +
+  geom_text(
+    data = r2_df,
+    aes(label = label),
+    x = -Inf, y = Inf,
+    hjust = -0.1, vjust = 1.1,
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "Blackbird vs Greenhouse severity at 10 dpi (line-level)",
+    x = "Greenhouse severity (mean log1p colonies)",
+    y = "Blackbird severity (mean severity at 10 dpi)"
+  ) +
+  theme_classic()
+
+# compare gh and bb severity at 10 dpi facet by pop
+ggplot(bb_gh_10_no_log, aes(x = gh_rep_mean, y = bb_sev10_mean)) +
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ cross, scales = "free") +
+  geom_text(
+    data = r2_df_no_log,
+    aes(label = label),
+    x = -Inf, y = Inf,
+    hjust = -0.1, vjust = 1.1,
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "Blackbird vs Greenhouse severity at 10 dpi (line-level)",
+    x = "Greenhouse severity (mean rep colonies)",
+    y = "Blackbird severity (mean rep severity at 10 dpi)"
+  ) +
+  theme_classic()
+
+# compare gh and bb severity at 10 dpi facet by pop
+ggplot(bb_gh_10, aes(x = gh_log1p_mean, y = bb_sev10_mean)) +
+  geom_point(alpha = 0.8) +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ cross, scales = "free") +
+  geom_text(
+    data = r2_df,
+    aes(label = label),
+    x = -Inf, y = Inf,
+    hjust = -0.1, vjust = 1.1,
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "Blackbird vs Greenhouse severity at 10 dpi (line-level)",
+    x = "Greenhouse severity (mean log1p colonies)",
+    y = "Blackbird severity (mean log1p(severity) at 10 dpi)"
+  ) +
+  theme_classic()
+
+
+########################################################
+# z-score population density comparison gh v day 10 bb #
+########################################################
+
+#note: ran everything with raw then z-scored in addition to log1p(gh) then z-scored and had same results, so I removed non-log1p transformed version. 
+
+dist_df <- bb_gh_10 %>%
+  dplyr::select(identifier, cross, gh_log1p_mean, bb_sev10_mean) %>%
+  pivot_longer(cols = c(gh_log1p_mean, bb_sev10_mean),
+               names_to = "source", values_to = "severity") %>%
+  group_by(cross, source) %>%
+  mutate(severity_z = as.numeric(scale(severity))) %>%
+  ungroup()
+
+
+dist_df_plot <- dist_df %>%
+  mutate(
+    source = recode(
+      source,
+      bb_sev10_mean = "Blackbird",
+      gh_log1p_mean = "Greenhouse"
+    ),
+    source = factor(source, levels = c("Blackbird", "Greenhouse"))
+  )
+
+
+n_labels <- dist_df_plot %>%
+  group_by(cross, source) %>%
+  summarise(
+    n = sum(!is.na(severity_z)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    label = paste0("n = ", n)
+  )
+
+n_labels_one <- n_labels %>%
+  filter(source == "Blackbird")
+
+# with greenhouse log1p-transformed then everything z-scored
+ggplot(dist_df_plot, aes(x = severity_z)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 25, alpha = 0.4) +
+  geom_density() +
+  geom_text(
+    data = n_labels_one,
+    aes(label = label),
+    x = -Inf,
+    y = Inf,
+    hjust = -0.1,
+    vjust = 1.2,
+    size = 3.5,
+    inherit.aes = FALSE
+  ) +
+  facet_grid(source ~ cross) +
+  labs(
+    title = "Severity distributions at 10 dpi (z-scored within each cross)",
+    x = "Severity (z-score within each cross)",
+    y = "Density"
+  ) +
+  theme_classic() +
+  theme(
+    strip.text.x = element_text(size = 12, face = "bold"),
+    strip.text.y = element_text(size = 12, face = "bold")
+  )
+
+ggsave(
+  filename = "severity_distributions_10dpi_bb_vs_gh.png",
+  width = 7,
+  height = 4,
+  units = "in",
+  dpi = 300
+)
+
+
+```
+# -------------------------
+## Functions for later use
+```{r utils and analysis}
+
+# --- entry-mean H2 / repeatability from lmer ---
+H2_entry_mean <- function(mod, r_bar, id_col = "identifier") {
+  vc <- as.data.frame(VarCorr(mod))
+
+  if (!("Residual" %in% vc$grp)) stop("Residual variance not found.")
+  if (!(id_col %in% vc$grp)) stop("Genotype group not found.")
+
+  Vg <- vc$vcov[vc$grp == id_col][1]
+  Ve <- vc$vcov[vc$grp == "Residual"][1]
+
+  H2 <- Vg / (Vg + Ve / r_bar)
+
+  list(H2 = as.numeric(H2), r_bar = as.numeric(r_bar), vc = vc)
+}
+
+
+# --- BLUPs (random intercepts) turned into genotype-level predictions ---
+extract_blup <- function(mod, grp = "identifier", name = "bb_blup") {
+  re <- lme4::ranef(mod)[[grp]]           # data.frame with rownames = levels
+  out <- tibble::tibble(
+    identifier = rownames(re),
+    bb_blup = re[["(Intercept)"]]
+  )
+  names(out)[names(out) == "bb_blup"] <- name
+  out
+}
+
+
+# --- simple correlation + plot helper ---
+# --- correlation + plot helper (with optional on-plot stats) ---
+# --- correlation + plot helper (overlay r and rho, no p-values, upper-left) ---
+corr_and_plot <- function(df, x, y, xlab, ylab, title = NULL,
+                          overlay = c("pearson", "spearman"),
+                          digits = 2,
+                          label_nudge = 0.02) {
+
+  x <- rlang::ensym(x); y <- rlang::ensym(y)
+  dat <- df %>% dplyr::filter(!is.na(!!x), !is.na(!!y))
+
+  # run tests (still printed to console)
+  sp <- cor.test(dat[[rlang::as_string(x)]], dat[[rlang::as_string(y)]],
+                 method = "spearman", exact = FALSE)
+  pe <- cor.test(dat[[rlang::as_string(x)]], dat[[rlang::as_string(y)]],
+                 method = "pearson")
+
+  cat("\n--- Spearman ---\n"); print(sp)
+  cat("\n--- Pearson ---\n");  print(pe)
+
+  overlay <- match.arg(tolower(overlay), choices = c("pearson", "spearman"), several.ok = TRUE)
+
+  # build label text (NO p-values)
+  lines <- c()
+  if ("pearson" %in% overlay) {
+    lines <- c(lines, paste0("Pearson r = ", round(unname(pe$estimate), digits)))
+  }
+  if ("spearman" %in% overlay) {
+    lines <- c(lines, paste0("Spearman \u03C1 = ", round(unname(sp$estimate), digits)))
+  }
+  label_text <- paste(lines, collapse = "\n")
+
+  # upper-left placement using data range
+  xr <- range(dat[[rlang::as_string(x)]], na.rm = TRUE)
+  yr <- range(dat[[rlang::as_string(y)]], na.rm = TRUE)
+  x_loc <- xr[1] + label_nudge * diff(xr)   # left
+  y_loc <- yr[2] - label_nudge * diff(yr)   # top
+
+  ggplot(dat, aes(x = !!x, y = !!y)) +
+    geom_point(alpha = 0.7) +
+    geom_smooth(method = "lm", se = TRUE) +
+    annotate("text", x = x_loc, y = y_loc, label = label_text,
+             hjust = 0, vjust = 1, size = 3.5) +
+    labs(x = xlab, y = ylab, title = title) +
+    theme_classic()
+}
+
+
+
+##### FUNCTION TO RUN BLACKBIRD MODEL COMBINATIONS ######
+# ---- core runner: one dpi × one trait ----
+run_bb_trait <- function(
+  bb,
+  dpi_value,
+  trait,
+  id_col = "identifier",
+  date_col = "imaging_date",
+  tray_col = "tray",
+  discard_col = "discard_rate",
+  max_discard = 0.15,
+  weight_floor = 0.05,
+  use_gxe = TRUE,          # include (1 | date:id)
+  use_tray = TRUE          # include (1 | date:tray)
+) {
+  stopifnot(is.character(trait), length(trait) == 1)
+
+  # Ensure dpi comparison works whether dpi is factor or numeric
+  dpi_chr <- as.character(dpi_value)
+
+  # 1) filter and compute weights
+  df <- bb %>%
+    filter(as.character(.data[["dpi"]]) == dpi_chr) %>%
+    filter(!is.na(.data[[trait]])) %>%
+    filter(!is.na(.data[[discard_col]]), .data[[discard_col]] <= max_discard) %>%
+    mutate(weight = pmax(weight_floor, 1 - .data[[discard_col]]))
+
+  if (nrow(df) == 0) {
+    stop("No rows left after filtering for dpi=", dpi_chr, " and trait=", trait)
+  }
+
+  # 2) aggregate to biorep = tray × date × genotype
+  biorep <- df %>%
+    group_by(.data[[tray_col]], .data[[date_col]], .data[[id_col]]) %>%
+    summarise(
+      value    = weighted.mean(.data[[trait]], weight, na.rm = TRUE),
+      n_disks  = n(),
+      sw       = sum(weight, na.rm = TRUE),
+      sw2      = sum(weight^2, na.rm = TRUE),
+      n_eff_w  = if_else(sw2 > 0, sw^2 / sw2, NA_real_),
+      .groups  = "drop"
+    ) %>%
+    dplyr::select(-sw, -sw2) %>%
+    filter(!is.na(n_eff_w), n_eff_w > 0) %>%
+    mutate(
+      across(all_of(c(id_col, date_col, tray_col)), ~ as.factor(.x))
+    )
+
+  # 3) model formula (optionally include tray and G×E)
+  rand_terms <- c(
+    paste0("(1 | ", date_col, ")"),
+    if (use_tray) paste0("(1 | ", date_col, ":", tray_col, ")") else NULL,
+    paste0("(1 | ", id_col, ")"),
+    if (use_gxe) paste0("(1 | ", date_col, ":", id_col, ")") else NULL
+  )
+  fml <- as.formula(paste("value ~", paste(rand_terms, collapse = " + ")))
+
+  mod <- lmer(
+    fml,
+    data = biorep,
+    weights = n_eff_w,
+    REML = TRUE
+  )
+
+  # 4) variance components
+  vc <- as.data.frame(VarCorr(mod))
+  Vg  <- vc$vcov[vc$grp == id_col]
+  Ve  <- vc$vcov[vc$grp == "Residual"]
+  Vge <- if (use_gxe) vc$vcov[vc$grp == paste0(date_col, ":", id_col)] else 0
+  Vt  <- if (use_tray) vc$vcov[vc$grp == paste0(date_col, ":", tray_col)] else 0
+
+  # 5) effective env and reps per env (based on biorep rows)
+  eff <- biorep %>%
+    distinct(.data[[id_col]], .data[[date_col]], .data[[tray_col]]) %>%
+    group_by(.data[[id_col]]) %>%
+    summarise(
+      n_env = n_distinct(.data[[date_col]]),
+      n_rep = n(), # trays across env
+      .groups = "drop"
+    )
+
+  n_env_eff <- 1 / mean(1 / eff$n_env)
+  n_rep_eff <- 1 / mean(1 / (eff$n_rep / eff$n_env))
+
+  # 6) entry-mean H2 (GH-aligned)
+  H2_entry_mean <- as.numeric(
+    Vg / (Vg + Vge / n_env_eff + (Vt + Ve) / (n_env_eff * n_rep_eff))
+  )
+
+  # 7) Cullis H2 (mean reliability)
+  re_id <- ranef(mod, condVar = TRUE)[[id_col]]
+  PEV <- as.numeric(attr(re_id, "postVar")[1, 1, ])
+  H2_cullis <- mean(1 - PEV / Vg, na.rm = TRUE)
+
+  # 8) BLUP table
+  blups <- re_id %>%
+    as.data.frame() %>%
+    rownames_to_column(id_col) %>%
+    rename(blup = `(Intercept)`) %>%
+    mutate(
+      PEV = PEV,
+      reliability = 1 - PEV / Vg
+    )
+
+  list(
+    dpi = dpi_chr,
+    trait = trait,
+    n_rows_input = nrow(df),
+    n_biorep = nrow(biorep),
+    is_singular = lme4::isSingular(mod),
+    n_env_eff = n_env_eff,
+    n_rep_eff = n_rep_eff,
+    Vg = as.numeric(Vg),
+    Vge = as.numeric(Vge),
+    Vtray = as.numeric(Vt),
+    Ve = as.numeric(Ve),
+    H2_entry_mean = H2_entry_mean,
+    H2_cullis = H2_cullis,
+    model = mod,
+    vc = vc,
+    biorep = biorep,
+    blups = blups
+  )
+}
+
+# ---- convenience wrapper: run many dpi:trait combos ----
+run_bb_suite <- function(bb, specs, ...) {
+  # specs: a list of list(dpi=5, trait="severity") etc.
+  results <- lapply(specs, function(s) {
+    run_bb_trait(bb, dpi_value = s$dpi, trait = s$trait, ...)
+  })
+
+  summary <- bind_rows(lapply(results, function(r) {
+    tibble(
+      dpi = r$dpi,
+      trait = r$trait,
+      n_rows_input = r$n_rows_input,
+      n_biorep = r$n_biorep,
+      n_env_eff = r$n_env_eff,
+      n_rep_eff = r$n_rep_eff,
+      Vg = r$Vg,
+      Vge = r$Vge,
+      Vtray = r$Vtray,
+      Ve = r$Ve,
+      H2_entry_mean = r$H2_entry_mean,
+      H2_cullis = r$H2_cullis,
+      is_singular = r$is_singular
+    )
+  }))
+
+  list(results = results, summary = summary)
+}
+
+##### Extract BB Blup Function #####
+get_bb_blups <- function(bb_out, dpi_value, trait) {
+  res <- purrr::keep(
+    bb_out$results,
+    ~ .x$dpi == as.character(dpi_value) && .x$trait == trait
+  )[[1]]
+
+  res$blups %>%
+    rename(
+      bb_blup = blup
+    ) %>%
+    mutate(
+      bb_blup_c = scale(bb_blup, center = TRUE, scale = FALSE)[,1]
+    )
+}
+
+
+#### RANK CORRELATION PLOT FUNCTION #####
+plot_rank_corr <- function(dpi_value, trait) {
+  bb_blups <- get_bb_blups(bb_out, dpi_value, trait)
+
+  df <- inner_join(gh_blups, bb_blups, by = "identifier") %>%
+    mutate(
+      gh_rank = rank(gh_blup, ties.method = "average"),
+      bb_rank = rank(bb_blup, ties.method = "average")
+    )
+
+  # Spearman (rank correlation)
+  ct_s <- suppressWarnings(
+    cor.test(df$gh_blup, df$bb_blup, method = "spearman", exact = FALSE)
+  )
+
+  # Kendall's tau-b (handles ties)
+  ct_k <- suppressWarnings(
+    cor.test(df$gh_blup, df$bb_blup, method = "kendall", exact = FALSE)
+  )
+
+  label <- sprintf(
+    "Spearman \u03C1 = %.3f (p = %.2g)\nKendall \u03C4-b = %.3f (p = %.2g)\nN = %d",
+    unname(ct_s$estimate), ct_s$p.value,
+    unname(ct_k$estimate), ct_k$p.value,
+    nrow(df)
+  )
+
+  ggplot(df, aes(x = gh_rank, y = bb_rank)) +
+    geom_point(
+      alpha = 0.5,
+      position = position_jitter(width = 3, height = 3)
+    ) +
+    geom_smooth(method = "lm", se = FALSE, color = "black") +
+    annotate(
+      "label",
+      x = max(df$gh_rank) * 0.98,
+      y = min(df$bb_rank) * 1.02,
+      hjust = 1, vjust = 0,
+      label = label,
+      size = 3.5,
+      fill = "white",
+      alpha = 0.75,
+    ) +
+    labs(
+      title = paste("Rank agreement: GH vs Blackbird", trait, dpi_value, "dpi"),
+      x = "Greenhouse rank",
+      y = "Blackbird rank"
+    ) +
+    theme_classic()
+}
+
+
+
+################ AUDPC FUNCTION ################
+audpc_trap <- function(x, y) {
+  ok <- !is.na(x) & !is.na(y)
+  x <- x[ok]; y <- y[ok]
+  if (length(x) < 2 || length(unique(x)) < 2) return(NA_real_)
+
+  ord <- order(x)
+  x <- x[ord]; y <- y[ord]
+
+  # trapezoid rule
+  sum(diff(x) * (head(y, -1) + tail(y, -1)) / 2)
+}
+
+############## AUDPC MODEL FUNCTION #############
+detect_col <- function(df, candidates, label) {
+  hit <- candidates[candidates %in% names(df)]
+  if (length(hit) == 0) {
+    stop("Could not find ", label, " column. Tried: ",
+         paste(candidates, collapse = ", "),
+         "\nAvailable columns: ", paste(names(df), collapse = ", "))
+  }
+  hit[[1]]
+}
+
+run_bb_audpc_trait <- function(
+  bb_biorep_audpc,
+  trait_name,
+  require_timepoints = NULL,   # set to 3 for sensitivity; NULL for all
+  compute_cullis = TRUE
+) {
+  df <- bb_biorep_audpc %>%
+    filter(trait == trait_name) %>%
+    filter(!is.na(audpc))
+
+  if (!is.null(require_timepoints)) {
+    df <- df %>% filter(n_timepoints >= require_timepoints)
+  }
+  if (nrow(df) == 0) stop("No rows left for trait = ", trait_name)
+
+  # Ensure factors + stable weights column for lmer
+  df <- df %>%
+    mutate(
+      identifier = factor(identifier),
+      rep_id = factor(rep_id),
+      w_fit = if_else(is.na(w_audpc) | w_audpc <= 0, 1, w_audpc)
+    )
+
+  # Fit model
+  mod <- lmer(
+    audpc ~ (1 | identifier) + (1 | rep_id),
+    data = df,
+    weights = w_fit,
+    REML = TRUE
+  )
+
+  # Variance components
+  vc <- as.data.frame(VarCorr(mod))
+  Vg <- vc$vcov[vc$grp == "identifier"]
+  Ve <- vc$vcov[vc$grp == "Residual"]
+
+  # Mean reps per genotype
+  r_bar <- df %>%
+    distinct(identifier, rep_id) %>%
+    count(identifier) %>%
+    summarise(r_bar = mean(n), .groups = "drop") %>%
+    pull(r_bar)
+
+  # Entry-mean H² (for this simple two-random-effect model)
+  H2_entry <- as.numeric(Vg / (Vg + Ve / r_bar))
+
+  # BLUPs + Cullis H²
+  re_id <- ranef(mod, condVar = TRUE)$identifier
+  PEV <- as.numeric(attr(re_id, "postVar")[1, 1, ])
+
+  H2_cullis <- NA_real_
+  if (compute_cullis) {
+    H2_cullis <- mean(1 - PEV / Vg, na.rm = TRUE)
+  }
+
+  blups <- re_id %>%
+    as.data.frame() %>%
+    rownames_to_column("identifier") %>%
+    rename(blup = `(Intercept)`) %>%
+    mutate(
+      PEV = PEV,
+      reliability = 1 - PEV / Vg
+    )
+
+  rep_summary <- df %>%
+    distinct(identifier, rep_id) %>%
+    count(identifier) %>%
+    summarise(
+      min = min(n), median = median(n), max = max(n), mean = mean(n),
+      .groups = "drop"
+    )
+
+  list(
+    trait = trait_name,
+    n = nrow(df),
+    n_ids = n_distinct(df$identifier),
+    timepoint_filter = require_timepoints,
+    is_singular = lme4::isSingular(mod),
+    Vg = as.numeric(Vg),
+    Ve = as.numeric(Ve),
+    r_bar = as.numeric(r_bar),
+    H2_entry_mean = H2_entry,
+    H2_cullis = H2_cullis,
+    rep_summary = rep_summary,
+    vc = vc,
+    model = mod,
+    blups = blups
+  )
+}
+
+run_bb_audpc_suite <- function(bb_biorep_audpc, traits, do_3tp = TRUE) {
+  main <- map(traits, ~ run_bb_audpc_trait(bb_biorep_audpc, .x, require_timepoints = NULL))
+
+  main_summary <- bind_rows(lapply(main, function(r) {
+    tibble(
+      trait = r$trait,
+      n = r$n,
+      n_ids = r$n_ids,
+      r_bar = r$r_bar,
+      Vg = r$Vg,
+      Ve = r$Ve,
+      H2_entry_mean = r$H2_entry_mean,
+      H2_cullis = r$H2_cullis,
+      is_singular = r$is_singular
+    )
+  }))
+
+  if (!do_3tp) return(list(main = main, main_summary = main_summary))
+
+  sens <- map(traits, ~ run_bb_audpc_trait(bb_biorep_audpc, .x, require_timepoints = 3))
+
+  sens_summary <- bind_rows(lapply(sens, function(r) {
+    tibble(
+      trait = r$trait,
+      n = r$n,
+      n_ids = r$n_ids,
+      r_bar = r$r_bar,
+      H2_entry_mean = r$H2_entry_mean,
+      H2_cullis = r$H2_cullis,
+      is_singular = r$is_singular,
+      filter = "n_timepoints>=3"
+    )
+  }))
+
+  list(
+    main = main,
+    main_summary = main_summary,
+    sens_3tp = sens,
+    sens_summary = sens_summary
+  )
+}
+
+############## PLOT AUDPC CORRELATIONS ##############
+
+get_bb_audpc_blups <- function(audpc_out, trait_name) {
+  audpc_out$main[[which(
+    purrr::map_chr(audpc_out$main, "trait") == trait_name
+  )]]$blups %>%
+    transmute(
+      identifier = identifier,
+      bb_blup = blup
+    )
+}
+
+
+plot_rank_corr_audpc <- function(
+  gh_blups,
+  audpc_out,
+  trait,
+  method = "spearman"  # "spearman" or "kendall"
+) {
+  bb_blups <- get_bb_audpc_blups(audpc_out, trait)
+
+  df <- inner_join(gh_blups, bb_blups, by = "identifier") %>%
+    mutate(
+      gh_rank = rank(gh_blup, ties.method = "average"),
+      bb_rank = rank(bb_blup, ties.method = "average")
+    )
+
+  # Rank correlation test
+  cor_res <- cor.test(
+    df$gh_rank,
+    df$bb_rank,
+    method = method,
+    exact = FALSE
+  )
+
+  rho <- unname(cor_res$estimate)
+  pval <- cor_res$p.value
+
+  ggplot(df, aes(x = gh_rank, y = bb_rank)) +
+    geom_point(alpha = 0.4, size = 1.5) +
+    geom_smooth(method = "lm", se = FALSE, color = "black") +
+    labs(
+      title = paste("GH vs Blackbird AUDPC rank agreement"),
+      subtitle = paste0(
+        trait, " | ",
+        method, " ρ = ", round(rho, 3),
+        ", p = ", signif(pval, 3)
+      ),
+      x = "Greenhouse BLUP rank",
+      y = "Blackbird AUDPC BLUP rank"
+    ) +
+    theme_classic()
+}
+
+################## FOUR PANEL FIG FOR PUB ############################
+
+rank_corr_plot <- function(df, title = "", subtitle = "", jitter = 3) {
+  ggplot(df, aes(x = gh_rank, y = bb_rank)) +
+    geom_point(alpha = 0.35,
+               position = position_jitter(width = jitter, height = jitter)) +
+    geom_smooth(method = "lm", se = FALSE, color = "black") +
+    labs(title = title, subtitle = subtitle,
+         x = "Greenhouse BLUP rank", y = "Blackbird BLUP rank") +
+    theme_classic()
+}
+
+make_rank_df <- function(gh_blups, bb_blups, bb_col = "bb_blup") {
+  inner_join(gh_blups, bb_blups, by = "identifier") %>%
+    mutate(
+      gh_rank = rank(gh_blup, ties.method = "average"),
+      bb_rank = rank(.data[[bb_col]], ties.method = "average")
+    )
+}
+
+annotate_rank_stats <- function(df) {
+  sp <- suppressWarnings(cor.test(df$gh_rank, df$bb_rank, method = "spearman", exact = FALSE))
+  kd <- suppressWarnings(cor.test(df$gh_rank, df$bb_rank, method = "kendall",  exact = FALSE))
+  sprintf("Spearman ρ = %.3f | Kendall τ = %.3f | N = %d",
+          unname(sp$estimate), unname(kd$estimate), nrow(df))
+}
+
+get_bb_timepoint_blups <- function(bb_out, dpi_value, trait) {
+  # make matching tolerant to dpi type
+  hits <- purrr::keep(bb_out$results, function(x) {
+    same_dpi <- as.character(x$dpi) == as.character(dpi_value)
+    same_trait <- as.character(x$trait) == as.character(trait)
+    same_dpi && same_trait
+  })
+
+  if (length(hits) == 0) {
+    # show what IS available at that dpi
+    avail <- tibble::tibble(
+      dpi = purrr::map_chr(bb_out$results, ~ as.character(.x$dpi)),
+      trait = purrr::map_chr(bb_out$results, ~ as.character(.x$trait))
+    ) %>%
+      dplyr::filter(dpi == as.character(dpi_value)) %>%
+      dplyr::distinct(trait) %>%
+      dplyr::arrange(trait)
+
+    stop(
+      "No bb_out$results match dpi=", dpi_value, " and trait='", trait, "'.\n",
+      "Available traits at dpi=", dpi_value, " are:\n",
+      paste0(" - ", avail$trait, collapse = "\n")
+    )
+  }
+
+  res <- hits[[1]]
+
+  res$blups %>%
+    dplyr::transmute(
+      bb_blup = blup
+    )
+}
+###################### COMPARE 10 DPI AND AUDPC BLUPS ########################
+bootstrap_delta_rho <- function(df, nboot = 2000, seed = 1) {
+  set.seed(seed)
+  n <- nrow(df)
+
+  # observed
+  rho_a <- cor(df$gh_blup, df$bb_a, method = "spearman", use = "complete.obs")
+  rho_b <- cor(df$gh_blup, df$bb_b, method = "spearman", use = "complete.obs")
+  delta_obs <- rho_a - rho_b
+
+  deltas <- replicate(nboot, {
+    idx <- sample.int(n, n, replace = TRUE)
+    cor(df$gh_blup[idx], df$bb_a[idx], method = "spearman") -
+      cor(df$gh_blup[idx], df$bb_b[idx], method = "spearman")
+  })
+
+  ci <- quantile(deltas, c(0.025, 0.975), na.rm = TRUE)
+  p_one_sided <- mean(deltas <= 0, na.rm = TRUE)  # P(delta <= 0)
+
+  list(delta_obs = delta_obs, ci = ci, p_one_sided = p_one_sided, deltas = deltas)
+}
+
+
+```
+
+
+# -------------------------
+## Greenhouse BLUPs
+
+```{r}
+gh_obs <- gh_obs %>%
+  mutate(class = if_else(identifier %in% c("Positive_Control","Nugget"), "Control", "NAM"),
+         class = factor(class)) %>%
+  dplyr::filter(!identifier %in% "Negative_Control")
+
+cat("Summary of number of runs per identifier:\n")
+gh_obs %>% distinct(identifier, inoculation_date) %>% count(identifier) %>% summary()
+
+cat("Distribution of replicate counts per inoculation date:\n")
+gh_obs %>% distinct(inoculation_date, identifier) %>% count(inoculation_date) %>% summary()
+
+
+gh_mod <- lmer(
+  replicate_log ~ 
+    rater +                             # fixed effect: scorer identity (systematic rater bias)
+    (1 | identifier) +                  # genetic main effect (Vg)
+    (1 | inoculation_date) +            # environment/run effect
+    (1 | inoculation_date:replicate) +  # replicate plant within run
+    (1 | inoculation_date:identifier),  # genotype × environment interaction
+  data = gh_obs,
+  REML = TRUE
+)
+
+# note: I modeled with and without class as a fixed effect at it had less than 1% difference..
+
+eff_counts <- gh_obs %>%
+  distinct(identifier, inoculation_date, replicate) %>%
+  group_by(identifier) %>%
+  summarise(
+    n_env = n_distinct(inoculation_date),
+    n_rep = n(),  # total reps across env
+    .groups="drop"
+  )
+
+n_env_eff <- 1 / mean(1 / eff_counts$n_env)
+n_rep_eff <- 1 / mean(1 / (eff_counts$n_rep / eff_counts$n_env))  # reps per env
+
+# make df with variance
+vc <- as.data.frame(VarCorr(gh_mod))
+
+# genotype
+Vg  <- vc$vcov[vc$grp == "identifier"]
+cat("Genotype variance", Vg)
+
+# genotype by env
+Vge <- vc$vcov[vc$grp == "inoculation_date:identifier"]
+cat("G x E variance", Vge)
+
+# environment
+Ve  <- vc$vcov[vc$grp == "Residual"]
+cat("Residual variance", Ve)
+
+H2_mean_Gh <- Vg / (Vg + Vge / n_env_eff + Ve / (n_env_eff * n_rep_eff))
+cat("Greenhouse H2 entry mean: ", H2_mean_Gh)
+
+
+# BLUPs + their conditional variances (PEV)
+re_id <- ranef(gh_mod, condVar = TRUE)$identifier
+postVar <- attr(re_id, "postVar")  # array: 1 x 1 x nLevels for random intercept
+
+# reliability ≈ confidence in each genotype’s BLUP
+blup_df <- re_id %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("identifier") %>%
+  mutate(
+    gh_blup = .data[["(Intercept)"]],
+    PEV = as.numeric(postVar[1, 1, ]),          # Var(u | y)
+    reliability = 1 - PEV / Vg                  # per-line reliability
+  ) %>%
+  dplyr::select(-"(Intercept)")
+
+gh_blups <- blup_df %>%
+  mutate(gh_blup_c = scale(gh_blup, center = TRUE, scale = FALSE)[,1])
+
+# no random-effect variance is collapsing to ~0
+lme4::isSingular(gh_mod)
+
+summary(blup_df$reliability)
+blup_df %>% arrange(reliability) %>% head(10)  # weakest BLUPs
+
+# Cullis H²
+H2_cullis_Gh <- mean(blup_df$reliability, na.rm = TRUE)
+cat("The average reliability of genotype BLUPs across the observed experimental design \n")
+cat("Greenhouse Cullis H2: ", H2_cullis_Gh)
+
+
+
+```
+Greenhouse powdery mildew severity was log-transformed prior to aggregation to stabilize variance. Subsamples within replicate plants were averaged to generate a single observation per genotype × inoculation date × replicate plant. Mixed-effects models included genotype as a random effect, inoculation date as an environmental effect, replicate plant nested within date, and a genotype-by-date interaction. Entry-mean heritability was estimated using effective numbers of environments and replicates per genotype. Because most genotypes were evaluated in a single inoculation run (n_env_eff ≈ 1), this estimate primarily reflects repeatability within the greenhouse assay rather than stability across environments.
+
+
+
+## Blackbird BLUPS 
+
+```{r Blackbird BLUPS}
+# function to prep different dpi dfs
+prep_bb_obs <- function(bb2, dpi_value) {
+  bb2 %>%
+    filter(
+      dpi == dpi_value,
+      !is.na(severity),
+      discard_rate <= 0.15,
+    ) %>%
+    mutate(weight = pmax(0.05, 1 - discard_rate))
+}
+
+# if _R1 or _R2 at the end of filename, remove it
+# R1 and R2 are directly tied to tray, so it's unnecessary
+bb2 <- bb2 %>%
+  dplyr::mutate(
+    filename = stringr::str_remove(filename, "_R[12]$")
+  )
+
+# Kish effective sample size
+calc_n_eff_weighted <- function(
+  bb_obs,
+  group_vars = c("tray","imaging_date","identifier"),
+  w_col = "weight"
+) {
+  bb_obs %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+    dplyr::summarise(
+      n_eff = (sum(.data[[w_col]], na.rm = TRUE)^2) / sum((.data[[w_col]]^2), na.rm = TRUE),
+      n     = dplyr::n(),
+      .groups = "drop"
+    )
+}
+
+```
+
+```{r}
+
+####################################
+#     10 dpi patch severity         #
+####################################
+
+# pull 10dpi
+bb10_obs <- prep_bb_obs(bb2, 10)
+
+
+# the biological replicate here: tray × imaging_date × identifier
+bb10_biorep <- bb10_obs %>%
+  dplyr::group_by(tray, imaging_date, identifier) %>%
+  dplyr::summarise(
+    severity = weighted.mean(severity, weight, na.rm = TRUE),
+    n_disks  = dplyr::n(),
+    sw  = sum(weight, na.rm = TRUE),
+    sw2 = sum(weight^2, na.rm = TRUE),
+    n_eff_w = dplyr::if_else(sw2 > 0, sw^2 / sw2, NA_real_),
+    .groups = "drop"
+  ) %>%
+  dplyr::select(-sw, -sw2)
+
+bb10_biorep <- bb10_biorep %>%
+  filter(!is.na(n_eff_w), n_eff_w > 0)
+
+bb_mod_10dpi <- lmer(
+  severity ~ 
+    (1 | imaging_date) +
+    (1 | imaging_date:tray) +
+    (1 | identifier) +
+    (1 | imaging_date:identifier),
+  data = bb10_biorep,
+  weights = n_eff_w,
+  REML = TRUE
+)
+
+# keep all random effects (this returns false)
+lme4::isSingular(bb_mod_10dpi)
+
+# extract variance components
+vc <- as.data.frame(VarCorr(bb_mod_10dpi))
+Vg  <- vc$vcov[vc$grp == "identifier"]
+Vge <- vc$vcov[vc$grp == "imaging_date:identifier"]
+Vt  <- vc$vcov[vc$grp == "imaging_date:tray"]
+Ve  <- vc$vcov[vc$grp == "Residual"]
+
+eff <- bb10_biorep %>%
+  distinct(identifier, imaging_date, tray) %>%
+  group_by(identifier) %>%
+  summarise(
+    n_env = n_distinct(imaging_date),
+    n_rep = n(),  # trays across env
+    .groups = "drop"
+  )
+
+n_env_eff <- 1 / mean(1 / eff$n_env)
+n_rep_eff <- 1 / mean(1 / (eff$n_rep / eff$n_env))
+
+H2_entry_mean_10dpi <- Vg / (Vg + Vge / n_env_eff + (Vt + Ve) / (n_env_eff * n_rep_eff))
+H2_entry_mean_10dpi
+
+re_id <- ranef(bb_mod_10dpi, condVar = TRUE)$identifier
+PEV <- as.numeric(attr(re_id, "postVar")[1, 1, ])
+
+# On average, how reliable are the genotype BLUPs given the actual, uneven information content?
+H2_cullis_10dpi <- mean(1 - PEV / Vg, na.rm = TRUE)
+H2_cullis_10dpi
+
+hist(bb10_biorep$severity)
+VarCorr(bb_mod_10dpi)
+
+
+```
+
+
+
+```{r}
+# use blackbird model function to get H2 entry means and H2 cullis values for all the combinations
+
+
+specs <- list(
+  list(dpi = 5,  trait = "smoothgrad_inf_sr"),
+  list(dpi = 5,  trait = "gradcam_inf_sr"),
+  list(dpi = 10,  trait = "smoothgrad_inf_sr"),
+  list(dpi = 10,  trait = "gradcam_inf_sr"),
+  
+  list(dpi = 5,  trait = "smoothgrad_spor_sr"),
+  list(dpi = 5,  trait = "gradcam_spor_sr"),
+  list(dpi = 10,  trait = "smoothgrad_spor_sr"),
+  list(dpi = 10,  trait = "gradcam_spor_sr"),
+  
+  list(dpi = 5,  trait = "smoothgrad_union_sr"),
+  list(dpi = 5,  trait = "gradcam_union_sr"),
+  list(dpi = 10,  trait = "smoothgrad_union_sr"),
+  list(dpi = 10,  trait = "gradcam_union_sr"),
+
+  list(dpi = 5,  trait = "severity"),
+  list(dpi = 5,  trait = "gradcam"),
+  list(dpi = 5,  trait = "smoothgrad"),
+  list(dpi = 10, trait = "severity"),
+  list(dpi = 10, trait = "gradcam"),
+  list(dpi = 10, trait = "smoothgrad"),
+  list(dpi = 10, trait = "sporulation_efficiency"),
+  list(dpi = 10, trait = "sporulating_pct")
+
+)
+
+bb_out <- run_bb_suite(bb2_all, specs)
+
+bb_out$summary
+
+bb_h2_all <- bb_out$summary %>%
+  mutate(
+    dpi = factor(dpi, levels = c("5", "10")),
+    trait = factor(trait, levels = c(
+      "smoothgrad_inf_sr",
+      "gradcam_inf_sr",
+      "smoothgrad_spor_sr",
+      "gradcam_spor_sr",
+      "smoothgrad_union_sr",
+      "gradcam_union_sr",
+      "severity",
+      "gradcam",
+      "smoothgrad",
+      "sporulation_efficiency",
+      "sporulating_pct"
+    ))
+  ) %>%
+  dplyr::select(
+    dpi, trait,
+    H2_entry_mean,
+    H2_cullis,
+    n_env_eff,
+    n_rep_eff,
+    is_singular
+  )
+
+bb10_sev_gradcam_sal_optim <- get_bb_blups(bb_out, 10, "gradcam_inf_sr")
+bb10_sev_smoothgrad_union_sr_sal_optim <- get_bb_blups(bb_out, 10, "smoothgrad_union_sr")
+
+
+
+bb_h2_long_all <- bb_h2_all %>%
+  pivot_longer(
+    cols = c(H2_entry_mean, H2_cullis),
+    names_to = "H2_type",
+    values_to = "H2"
+  ) %>%
+  mutate(
+    H2_type = recode(
+      H2_type,
+      H2_entry_mean = "Entry-mean H2",
+      H2_cullis = "Cullis H2"
+    )
+  )
+
+ggplot(bb_h2_long_all,
+       aes(x = trait, y = H2, fill = H2_type)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  facet_wrap(~ dpi, nrow = 1, labeller = label_both) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(
+    x = "Trait",
+    y = "Heritability",
+    fill = "",
+    title = "Blackbird heritability across dpi and traits"
+  ) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+
+bb_h2_all
+```
+
+# -------------------------
+## Blackbird v GH rank correlations
+
+```{r}
+available <- purrr::map_dfr(
+  bb_out$results,
+  ~ tibble::tibble(
+    dpi   = as.character(.x$dpi),
+    trait = .x$trait
+  )
+) %>%
+  dplyr::distinct()
+
+
+
+# note spearman is the important stat here because we're using different scales for bb and greenhouse, so we're interested in rank correlation not linear. 
+corr_results_all <- bb_h2_all %>%
+  dplyr::transmute(dpi = as.character(dpi), trait = as.character(trait)) %>%
+  dplyr::distinct() %>%
+  dplyr::semi_join(available, by = c("dpi", "trait")) %>%
+  dplyr::mutate(
+    cor_data = purrr::map2(dpi, trait, ~{
+      bb_blups <- get_bb_blups(bb_out, .x, .y)
+      dplyr::inner_join(gh_blups, bb_blups, by = "identifier")
+    }),
+    spearman = purrr::map_dbl(cor_data, ~ cor(.x$gh_blup, .x$bb_blup, method="spearman", use="complete.obs")),
+    pearson  = purrr::map_dbl(cor_data, ~ cor(.x$gh_blup, .x$bb_blup, method="pearson",  use="complete.obs")),
+    n = purrr::map_int(cor_data, nrow)
+  )
+
+
+corr_results_all %>%
+  dplyr::select(-cor_data)
+
+
+
+plot_rank_corr(10, "gradcam_union_sr")
+plot_rank_corr(5, "gradcam_union_sr")
+
+plot_rank_corr(5, "smoothgrad_union_sr")
+plot_rank_corr(10, "smoothgrad_union_sr")
+
+plot_rank_corr(10, "gradcam_spor_sr")
+plot_rank_corr(10, "smoothgrad_spor_sr")
+
+plot_rank_corr(5, "gradcam_inf_sr")
+plot_rank_corr(10, "gradcam_inf_sr")
+
+plot_rank_corr(5, "smoothgrad_inf_sr")
+plot_rank_corr(10, "smoothgrad_inf_sr")
+
+
+plot_rank_corr(10, "severity")
+plot_rank_corr(10, "gradcam")
+plot_rank_corr(10, "smoothgrad")
+plot_rank_corr(5, "smoothgrad")
+plot_rank_corr(10, "sporulation_efficiency")
+plot_rank_corr(10, "sporulating_pct")
+```
+
+## Blackbird AUDPC
+```{r audpc_correlation_plots1, fig.width=15, fig.height=11, dpi=300}
+
+inoculation_lookup <- tibble::tribble(
+  ~imaging_dt,      ~inoculation_date,
+  "8-9-2023",       "8-4-2023",
+  "10-10-2023",     "9-30-2023",
+  "10-5-2023",      "9-30-2023",
+  "10-16-2023",     "10-6-2023",
+  "10-11-2023",     "10-6-2023",
+  "11-1-2023",      "10-27-2023",
+  "10-25-2023",     "10-20-2023",
+  "10-30-2023",     "10-20-2023",
+  "11-19-2023",     "11-9-2023",
+  "11-14-2023",     "11-9-2023",
+  "11-6-2023",      "10-27-2023",
+  "4-21-2023",      "4-12-2023",
+  "4-17-2023",      "4-12-2023",
+  "5-5-2023",       "4-26-2023",
+  "5-1-2023",       "4-26-2023",
+  "7-17-2023",      "7-7-2023",
+  "7-12-2023",      "7-7-2023",
+  "7-2-2023",       "6-22-2023",
+  "6-27-2023",      "6-22-2023",
+  "8-21-2023",      "8-11-2023",
+  "8-16-2023",      "8-11-2023"
+) %>%
+  mutate(
+    imaging_dt = as.Date(imaging_dt, format = "%m-%d-%Y"),
+    inoculation_date = as.Date(inoculation_date, format = "%m-%d-%Y")
+  )
+
+#----------------------------
+# 0) Prep bb3 with inoculation dates
+#----------------------------
+
+bb3 <- bb2_all %>%
+  dplyr::select(
+    model_type, model_timestamp, imaging_date, dpi, tray, filename, identifier, sal_threshold,
+    discarded_patches, discard_rate, severity, gradcam, smoothgrad, sporulating_pct, gradcam_union_sr, smoothgrad_union_sr, gradcam_spor_sr, smoothgrad_spor_sr, gradcam_inf_sr, smoothgrad_inf_sr
+  ) %>%
+  dplyr::mutate(
+    imaging_dt = as.Date(
+      stringr::str_extract(imaging_date, "^[0-9]{1,2}-[0-9]{1,2}-[0-9]{4}"),
+      format = "%m-%d-%Y"
+    )
+  ) %>%
+  dplyr::left_join(inoculation_lookup, by = "imaging_dt") %>%
+  dplyr::filter(
+    sal_threshold == 0.5,
+    !filename %in% c(
+      "347-SYMPHONY_R2_WET_APP", "348-SYMPHONY_R2_WET_APP",
+      "349-SYMPHONY_R2_WET_APP", "350-SYMPHONY_R2_WET_APP",
+      "SYMPHONY_R2_WET_APP"
+    )
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::select(-imaging_date)
+
+
+#----------------------------
+# 1) Biorep time series at 5 and 10 dpi (weighted mean across disks)
+#    Biorep unit: tray × imaging_dt × identifier (genotype)
+#----------------------------
+bb_ts_biorep <- bb3 %>%
+  dplyr::mutate(
+    dpi = as.integer(as.character(dpi)),
+    dpi = dplyr::if_else(dpi == 9L, 10L, dpi),
+    weight = pmax(0.05, 1 - discard_rate),
+    rep_id = interaction(inoculation_date, tray, drop = TRUE)
+  ) %>%
+  dplyr::filter(
+    dpi %in% c(5L, 10L),
+    !is.na(severity),
+    discard_rate <= 0.15,
+    !is.na(inoculation_date)
+  ) %>%
+  dplyr::group_by(rep_id, inoculation_date, tray, imaging_dt, identifier, dpi) %>%
+  dplyr::summarise(
+    sev = weighted.mean(severity, weight, na.rm = TRUE),
+    sg_sev = weighted.mean(smoothgrad, weight, na.rm = TRUE),
+    gc_sev = weighted.mean(gradcam, weight, na.rm = TRUE),
+    spor_sev = weighted.mean(sporulating_pct, weight, na.rm = TRUE),
+    gradcam_union_sr_w = weighted.mean(gradcam_union_sr, weight, na.rm = TRUE),
+    smoothgrad_union_sr_w = weighted.mean(smoothgrad_union_sr, weight, na.rm = TRUE),
+    gradcam_spor_sr_w = weighted.mean(gradcam_spor_sr, weight, na.rm = TRUE),
+    smoothgrad_spor_sr_w = weighted.mean(smoothgrad_spor_sr, weight, na.rm = TRUE),
+    gradcam_inf_sr_w = weighted.mean(gradcam_inf_sr, weight, na.rm = TRUE),
+    smoothgrad_inf_sr_w = weighted.mean(smoothgrad_inf_sr, weight, na.rm = TRUE),
+    sw  = sum(weight, na.rm = TRUE),
+    sw2 = sum(weight^2, na.rm = TRUE),
+    n_eff_w = dplyr::if_else(sw2 > 0, sw^2 / sw2, NA_real_),
+    .groups = "drop"
+  ) %>%
+  dplyr::select(-sw, -sw2)
+
+
+#----------------------------
+# 2) Add synthetic 0 dpi point (sev = 0)
+#    Keep 0/5/10 for each rep_id × identifier
+#----------------------------
+bb_ts_biorep_0 <- bb_ts_biorep %>%
+  group_by(rep_id, identifier) %>%
+  tidyr::complete(dpi = c(0L, 5L, 10L)) %>%
+  ungroup() %>%
+  mutate(
+    across(
+      c(
+        sev, gc_sev, sg_sev, spor_sev,
+        gradcam_union_sr_w,
+        smoothgrad_union_sr_w,
+        gradcam_spor_sr_w,
+        smoothgrad_spor_sr_w,
+        gradcam_inf_sr_w,
+        smoothgrad_inf_sr_w
+      ),
+      ~ if_else(dpi == 0L & is.na(.x), 0, .x)
+    )
+  )
+
+
+
+#----------------------------
+# 3) Compute AUDPC per biorep (rep_id × identifier) over 0/5/10
+#----------------------------
+traits <- c(
+  "gc_sev",
+  "sg_sev",
+  "spor_sev",
+  "sev",
+  "gradcam_union_sr_w",
+  "smoothgrad_union_sr_w",
+  "gradcam_spor_sr_w",
+  "smoothgrad_spor_sr_w",
+  "gradcam_inf_sr_w",
+  "smoothgrad_inf_sr_w"
+)
+
+bb_biorep_audpc <- bb_ts_biorep_0 %>%
+  pivot_longer(
+    cols = all_of(traits),
+    names_to = "trait",
+    values_to = "value"
+  ) %>%
+  group_by(rep_id, identifier, trait) %>%
+  summarise(
+    n_timepoints = sum(!is.na(value)),      # timepoints available for this trait
+    audpc = audpc_trap(dpi, value),         # AUDPC on dpi scale
+    w_audpc = mean(n_eff_w, na.rm = TRUE),  # your existing precision proxy
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(audpc)) %>%
+  filter(n_timepoints > 2)
+
+#----------------------------
+# 4) Mixed model on AUDPC
+#----------------------------
+audpc_out <- run_bb_audpc_suite(bb_biorep_audpc, traits, do_3tp = TRUE)
+
+audpc_out$main_summary
+audpc_out$sens_summary
+
+bb_biorep_audpc %>%
+  group_by(trait) %>%
+  summarise(
+    cor_audpc_weight = cor(audpc, w_audpc, use = "complete.obs")
+  )
+
+#-------------------------------
+# 5) Spearman Rank Correlations
+#-------------------------------
+
+plots <- lapply(traits, function(tr) {
+  plot_rank_corr_audpc(
+    gh_blups = gh_blups,
+    audpc_out = audpc_out,
+    trait = tr,
+    method = "spearman"
+  )
+})
+
+patchwork::wrap_plots(plots)
+
+
+rank_corr_summary <- purrr::map_dfr(
+  traits,
+  function(tr) {
+    bb_blups <- get_bb_audpc_blups(audpc_out, tr)
+
+    df <- inner_join(gh_blups, bb_blups, by = "identifier") %>%
+      mutate(
+        gh_rank = rank(gh_blup, ties.method = "average"),
+        bb_rank = rank(bb_blup, ties.method = "average")
+      )
+
+    spearman <- cor.test(df$gh_rank, df$bb_rank, method = "spearman", exact = FALSE)
+    kendall  <- cor.test(df$gh_rank, df$bb_rank, method = "kendall",  exact = FALSE)
+
+    tibble(
+      trait = tr,
+      n = nrow(df),
+      spearman_rho = unname(spearman$estimate),
+      spearman_p = spearman$p.value,
+      kendall_tau = unname(kendall$estimate),
+      kendall_p = kendall$p.value
+    )
+  }
+)
+
+rank_corr_summary
+
+
+```
+For AUDPC analyses, replicate-level observations were weighted by the effective number of contributing image patches, reflecting phenotypic precision. This weighting was shared across traits derived from the same image sets.
+
+## Four panel publication figure
+```{r audpc_correlation_plots, fig.width=15, fig.height=11, dpi=300}
+
+audpc_panels <- map(traits, function(tr) {
+  bb_blups <- get_bb_audpc_blups(audpc_out, tr) %>%
+    rename(bb_blup = bb_blup)  # already bb_blup
+
+  df_rank <- make_rank_df(gh_blups, bb_blups, bb_col = "bb_blup")
+  subtxt <- annotate_rank_stats(df_rank)
+
+  rank_corr_plot(
+    df_rank,
+    title = paste0("AUDPC: ", tr),
+    subtitle = subtxt,
+    jitter = 3
+  )
+})
+
+fig_audpc <- wrap_plots(audpc_panels, ncol = 4) +
+  plot_annotation(title = "Greenhouse vs Blackbird AUDPC BLUP rank agreement")
+
+fig_audpc
+```
+
+
+## Is AUDPC sig better than 5 or 10dpi timepoint?
+
+```{r, eval=FALSE}
+# --- helpers ---------------------------------------------------------------
+
+standardize_id <- function(df) {
+  # Coerce non-data.frame (e.g., matrix) to data.frame
+  if (!is.data.frame(df)) df <- as.data.frame(df)
+
+  # If there's no identifier-like column, try to recover it from:
+  # 1) names() of a single vector column, or 2) rownames()
+  if (!("identifier" %in% tolower(names(df)))) {
+
+    # Case: 1-column object where IDs are stored in names(df[[1]])
+    if (ncol(df) == 1 &&
+        !is.null(names(df[[1]])) &&
+        length(names(df[[1]])) == nrow(df)) {
+      df <- tibble::tibble(
+        identifier = names(df[[1]]),
+        !!names(df)[1] := unname(df[[1]])
+      )
+    }
+
+    # Case: IDs stored in rownames
+    if (!("identifier" %in% tolower(names(df))) &&
+        !is.null(rownames(df)) &&
+        length(rownames(df)) == nrow(df) &&
+        any(nzchar(rownames(df)))) {
+      df <- tibble::as_tibble(df, rownames = "identifier")
+    }
+  }
+
+  nms  <- names(df)
+  cand <- nms[tolower(nms) %in% c("identifier", "conserved_identifier")]
+
+  if (length(cand) == 0) {
+    stop(
+      "standardize_id(): No identifier column found. Have: ",
+      paste(nms, collapse = ", ")
+    )
+  }
+
+  # Prefer conserved_identifier if present
+  pick <- if ("conserved_identifier" %in% tolower(cand)) {
+    cand[tolower(cand) == "conserved_identifier"][1]
+  } else {
+    cand[tolower(cand) == "identifier"][1]
+  }
+
+  df %>%
+    dplyr::mutate(
+      identifier = .data[[pick]] |>
+        stringr::str_trim() |>
+        stringr::str_to_upper()
+    ) %>%
+    # Drop other id-like columns, but keep canonical `identifier`
+    dplyr::select(-dplyr::any_of(setdiff(cand, "identifier")))
+}
+
+get_blup_from_model <- function(mod, name = "bb_blup") {
+  out <- tryCatch(
+    extract_blup(mod, grp = "identifier", name = name),
+    error = function(e) NULL
+  )
+
+  # Some models use "Identifier" (capital I)
+  if (is.null(out) || (is.data.frame(out) && nrow(out) == 0 && ncol(out) == 0)) {
+    out <- tryCatch(
+      extract_blup(mod, grp = "Identifier", name = name),
+      error = function(e) NULL
+    )
+  }
+
+  # Still empty? return a well-formed empty tibble
+  if (is.null(out) || (is.data.frame(out) && nrow(out) == 0 && ncol(out) == 0)) {
+    return(tibble::tibble(identifier = character(), !!name := numeric()))
+  }
+
+  standardize_id(out)
+}
+
+get_model <- function(model_list, key) {
+  if (!key %in% names(model_list)) {
+    stop(
+      "get_model(): No model found for tp_trait = '", key, "'. Available: ",
+      paste(names(model_list), collapse = ", ")
+    )
+  }
+  model_list[[key]]
+}
+
+
+# --- model maps ------------------------------------------------------------
+
+bb_mod_10 <- list(
+  severity   = bb_mod_10dpi,
+  gradcam    = bb_mod_10dpi_gradcam,
+  smoothgrad = bb_mod_10dpi_smoothgrad
+)
+
+bb_mod_5 <- list(
+  severity   = bb_mod_5dpi,
+  gradcam    = bb_mod_5dpi_gradcam,
+  smoothgrad = bb_mod_5dpi_smoothgrad
+)
+
+
+# --- trait map -------------------------------------------------------------
+
+trait_map <- tibble::tribble(
+  ~audpc_trait, ~tp_trait,
+  "sev",    "severity",
+  "gc_sev", "gradcam",
+  "sg_sev", "smoothgrad"
+)
+
+
+# --- run tests -------------------------------------------------------------
+
+run_delta_tests <- function(trait_map, bb_models, gh_blups, audpc_out,
+                            nboot = 2000, seed = 1) {
+  trait_map %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(
+      df = list({
+        gh_std <- standardize_id(gh_blups)
+
+        bb_aud <- get_bb_audpc_blups(audpc_out, audpc_trait) %>%
+          dplyr::rename(bb_a = bb_blup) %>%
+          standardize_id()
+
+        mod_tp <- get_model(bb_models, tp_trait)
+        bb_tp  <- get_blup_from_model(mod_tp, name = "bb_b")
+
+        dplyr::inner_join(gh_std, bb_aud, by = "identifier") %>%
+          dplyr::inner_join(bb_tp,  by = "identifier") %>%
+          dplyr::select(identifier, gh_blup, bb_a, bb_b)
+      }),
+      test = list(bootstrap_delta_rho(df, nboot = nboot, seed = seed)),
+      delta_obs = test$delta_obs,
+      ci_lo = test$ci[[1]],
+      ci_hi = test$ci[[2]],
+      p_one_sided = test$p_one_sided,
+      n = nrow(df)
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(audpc_trait, tp_trait, n, delta_obs, ci_lo, ci_hi, p_one_sided)
+}
+
+delta_tests_10dpi <- run_delta_tests(trait_map, bb_mod_10, gh_blups, audpc_out)
+delta_tests_5dpi  <- run_delta_tests(trait_map, bb_mod_5,  gh_blups, audpc_out)
+
+dela10_table <- delta_tests_10dpi
+dela5_table  <- delta_tests_5dpi
+
+
+dela10_table
+dela5_table
+
+```
+For Blackbird, using AUDPC vs using 5 dpi or 10 dpi doesn’t change how well Blackbird aligns with greenhouse at the genotype level (by correlation of BLUPs). Nonetheless, AUDPC did have a higher H2. 
+
+Unforutnately some of the model objects didnt save right so I had to comment out the above code, but here's the output: 
+
+| dpi  | audpc_trait | tp_trait    | n   | delta_obs | ci_lo  | ci_hi  | p_one_sided |
+|------|-------------|-------------|-----|-----------|--------|--------|-------------|
+| 10dpi | sev        | severity    | 579 | -0.010    | -0.029 | 0.008  | 0.882       |
+| 10dpi | gc_sev     | gradcam     | 579 | -0.005    | -0.026 | 0.015  | 0.700       |
+| 10dpi | sg_sev     | smoothgrad  | 579 | -0.012    | -0.030 | 0.006  | 0.903       |
+| 5dpi  | sev        | severity    | 579 | -0.010    | -0.043 | 0.025  | 0.702       |
+| 5dpi  | gc_sev     | gradcam     | 579 | -0.017    | -0.051 | 0.019  | 0.829       |
+| 5dpi  | sg_sev     | smoothgrad  | 579 | -0.010    | -0.045 | 0.026  | 0.707       |
+
+
+
+#--------------------------
+
+## Kappa thresholding 
+
+Optimum threshold for Kappa at 10dpi
+
+```{r}
+# BB day-10 line means (severity is 0–1)
+bb_line10 <- bb2_all %>%
+  mutate(dpi = as.character(dpi)) %>%
+  filter(dpi == "10") %>%
+  group_by(identifier) %>%
+  summarise(
+    bb_sev10 = mean(severity, na.rm = TRUE),
+    n_imgs = n(),
+    .groups = "drop"
+  )
+
+# Join to GH (uses gh_blups: identifier, gh_blup)
+dat_bin0 <- gh_line %>%
+  transmute(identifier, gh_resistant = (gh_log1p_mean == 0)) %>%
+  inner_join(bb_line10, by = "identifier") %>%
+  filter(!is.na(bb_sev10), !is.na(gh_resistant))
+
+# thresholds in "fraction" units since severity is 0–1
+thresholds <- seq(0, 0.25, by = 0.0025)  # 0–25% in fraction units
+
+score_tbl <- map_dfr(thresholds, function(th) {
+  bb_resistant <- dat_bin0$bb_sev10 <= th
+
+  cm <- caret::confusionMatrix(
+    data = factor(bb_resistant, levels = c(TRUE, FALSE)),
+    reference = factor(dat_bin0$gh_resistant, levels = c(TRUE, FALSE)),
+    positive = "TRUE"
+  )
+
+  tibble(
+    th = th,
+    th_pct = 100 * th,
+    Sens   = unname(cm$byClass["Sensitivity"]),
+    Spec   = unname(cm$byClass["Specificity"]),
+    BalAcc = unname(cm$byClass["Balanced Accuracy"]),
+    Kappa  = unname(cm$overall["Kappa"]),
+    Acc    = unname(cm$overall["Accuracy"]),
+    N      = nrow(dat_bin0)
+  )
+})
+
+score_tbl %>% arrange(desc(Kappa))  %>% slice(1:10)
+score_tbl %>% arrange(desc(BalAcc)) %>% slice(1:10)
+```
+
+Agreement between Blackbird-derived severity and greenhouse resistance classifications depended on the severity threshold used. Cohen’s κ was maximized at a Blackbird severity threshold of approximately 5–6% (κ ≈ 0.52), whereas balanced accuracy peaked at approximately 16–18% (≈0.75), reflecting a trade-off between specificity and sensitivity.
+
+The divergence between κ- and balanced-accuracy–optimal thresholds highlights an inherent trade-off between specificity and sensitivity when translating continuous image-based severity estimates into binary resistance classifications. Lower thresholds favor conservative identification of resistant lines and minimize false resistance calls, whereas higher thresholds capture a larger proportion of greenhouse-resistant lines but increase the risk of misclassifying susceptible genotypes. Importantly, the higher threshold range (16–18%) aligns with prior qualitative assessments of disease severity, supporting its utility for early-stage screening, while the lower threshold (5–6%) may be more appropriate for confirmatory selection decisions.
+
+# -------------------------
+## Discard-rate diagnostics (distribution + inflation check)
+
+```{r}
+
+bb_img <- bb2 %>%
+  mutate(
+    total_patches = clear_patches + hyphal_patches + conidiophore_patches + discarded_patches,
+    discard_rate  = discarded_patches / total_patches
+  ) %>%
+  filter(total_patches > 0)
+
+ggplot(bb_img, aes(discard_rate)) +
+  geom_histogram(bins = 50) +
+  labs(x = "Discard rate", y = "Image count") +
+  theme_classic()
+
+ggplot(bb_img, aes(discard_rate, severity)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "loess", se = TRUE) +
+  labs(x = "Discard rate", y = "Severity (fraction of patches)") +
+  theme_classic()
+
+summary(bb_img$discard_rate)
+summary(bb_img$severity)
+sum(is.na(bb_img$severity))
+
+
+```
+# -------------------------
+## Grid search for discard cutoff to maximize GH–BB rank agreement
+```{r}
+cut_grid <- seq(0, 1.0, by = 0.02)
+min_imgs_per_line <- 3
+min_lines <- 50
+
+score_cut <- function(cut) {
+
+  bb_f <- bb_img %>% filter(discard_rate <= cut)
+
+  bb_line10 <- bb_f %>%
+    mutate(dpi = as.character(dpi)) %>%
+    filter(dpi == "10") %>%
+    group_by(identifier) %>%
+    summarise(
+      bb_sev10 = mean(severity, na.rm = TRUE),
+      n_imgs   = n(),
+      .groups  = "drop"
+    ) %>%
+    filter(n_imgs >= min_imgs_per_line)
+
+  dat <- gh_blups %>% inner_join(bb_line10, by = "identifier")
+
+  n_lines <- nrow(dat)
+  sd_bb <- sd(dat$bb_sev10, na.rm = TRUE)
+  sd_gh <- sd(dat$gh_blup,  na.rm = TRUE)
+
+  rho <- suppressWarnings(
+    cor(dat$gh_blup, dat$bb_sev10, method = "spearman", use = "complete.obs")
+  )
+
+  reason <- "ok"
+  if (n_lines < min_lines) reason <- "too_few_lines"
+  if (!is.finite(sd_bb) || sd_bb < 1e-10) reason <- "bb_no_variance"
+  if (!is.finite(sd_gh) || sd_gh < 1e-10) reason <- "gh_no_variance"
+  if (!is.finite(rho)) reason <- paste0("rho_", reason)
+
+  tibble(
+    cut = cut,
+    n_lines = n_lines,
+    rho = rho,
+    reason = reason,
+    sd_bb = sd_bb,
+    sd_gh = sd_gh,
+    uniq_bb = dplyr::n_distinct(dat$bb_sev10),
+    uniq_gh = dplyr::n_distinct(dat$gh_blup)
+  )
+}
+
+res_dbg <- map_dfr(cut_grid, score_cut)
+
+res_dbg %>% count(reason)
+res_dbg %>% 
+  arrange(desc(rho)) %>% 
+  slice(1:10)
+
+
+ggplot(res_dbg, aes(cut, rho)) +
+  geom_line() +
+  geom_point(size = 1) +
+  labs(x = "Maximum allowed discard rate",
+       y = "Spearman ρ (GH vs BB day10 mean severity)") +
+  theme_classic()
+
+
+```
+
+
+Rank agreement between Blackbird and greenhouse phenotypes decreased monotonically as progressively less stringent discard-rate thresholds were applied, with Spearman’s ρ declining from 0.73 at a maximum discard rate of 0.02 to approximately 0.58 at 0.20. No discard threshold produced a local maximum in agreement, and all thresholds yielded stable estimates, indicating that image contamination alone does not account for the observed discordance. Accordingly, we selected a discard-rate threshold of 15%, which retained all genotypes while yielding near-maximal agreement, resulting in a modest increase in ρ without reducing genotype coverage.
+
+Notably, higher agreement was observed only at the most stringent discard thresholds, which substantially reduced the number of retained genotypes. This pattern suggests that improved concordance primarily reflects the exclusion of intermediate or ambiguous genotypes rather than correction of image-level artifacts. Together, these results indicate that limited assay sensitivity in the Blackbird system and/or inflated resistance classifications in the greenhouse assay, rather than image contamination, are the dominant contributors to discordance between platforms.
+
+# When greenhouse data show actual disease variation, does Blackbird agree better?
+
+```{r}
+
+dat_nonzero <- gh_line %>%
+  filter(gh_log1p_mean > 0) %>%
+  inner_join(bb_line10, by = "identifier") %>%
+  mutate(
+    gh_rank = rank(gh_log1p_mean, ties.method = "average"),
+    bb_rank = rank(bb_sev10, ties.method = "average")
+  )
+
+rho_nonzero <- cor(dat_nonzero$gh_rank, dat_nonzero$bb_rank)
+
+rho_nonzero
+# Basic diagnostics
+nrow(dat_nonzero)
+summary(dat_nonzero$gh_log1p_mean)
+summary(dat_nonzero$bb_sev10)
+
+
+
+# Rank correlation
+rho_nonzero <- suppressWarnings(
+  cor(
+    dat_nonzero$gh_log1p_mean,
+    dat_nonzero$bb_sev10,
+    method = "spearman",
+    use = "complete.obs"
+  )
+)
+
+rho_nonzero
+
+tau_nonzero <- suppressWarnings(
+  cor(
+    dat_nonzero$gh_log1p_mean,
+    dat_nonzero$bb_sev10,
+    method = "kendall",
+    use = "complete.obs"
+  )
+)
+
+tau_nonzero
+
+rho_all <- suppressWarnings(
+  cor(
+    gh_line$gh_log1p_mean,
+    bb_line10$bb_sev10[match(gh_line$identifier, bb_line10$identifier)],
+    method = "spearman",
+    use = "complete.obs"
+  )
+)
+
+tibble(
+  dataset = c("All genotypes", "GH > 0 only"),
+  rho = c(rho_all, rho_nonzero),
+  n = c(
+    sum(!is.na(gh_line$gh_log1p_mean)),
+    nrow(dat_nonzero)
+  )
+)
+
+
+dat_nonzero %>%
+  summarise(
+    sd_bb = sd(bb_sev10, na.rm = TRUE),
+    sd_gh = sd(gh_log1p_mean, na.rm = TRUE),
+    cor_pearson = cor(bb_sev10, gh_log1p_mean, method="pearson", use="complete.obs")
+  )
+
+
+```  
+
+Hypothesis	Supported?	Why
+BB noise	❌	sd_bb is healthy
+
+BB insensitivity	❌	continuous variation present
+
+Image contamination	❌	discard-rate analysis
+
+Scale mismatch	❌	rank metrics invariant
+
+GH zero inflation alone	❌	removing zeros worsens agreement
+
+
+Among genotypes exhibiting non-zero greenhouse disease, Blackbird severity retained substantial variation (SD ≈ 0.29), yet rank agreement with greenhouse phenotypes was modest (Spearman’s ρ ≈ 0.36; Kendall’s τ ≈ 0.25; Pearson’s r ≈ 0.37). Greenhouse phenotypes showed greater dispersion (SD ≈ 0.89), indicating that reduced concordance was not driven by limited variation or floor effects in the image-based assay
+
+The persistence of substantial variation in Blackbird severity among diseased genotypes, coupled with weak rank concordance with greenhouse phenotypes, suggests that the two assays capture overlapping but non-identical aspects of disease progression. Whereas greenhouse measurements quantify colony abundance, Blackbird-derived severity reflects leaf-area–based symptom development, which may diverge from colony counts at moderate disease levels. Consequently, agreement between platforms is strongest for distinguishing the presence or absence of disease, while relative ordering among diseased genotypes is less consistent.
+
+Blackbird severity should be interpreted as a continuous screening metric that requires thresholding to support binary resistance decisions, rather than as a direct surrogate for greenhouse disease severity.
