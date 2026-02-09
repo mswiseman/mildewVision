@@ -263,7 +263,7 @@ def grid_search_thresholds(
     return results[:top_k]
 
 
-def pred_img(img, model, dual_head: bool, use_autocast: bool = False):
+def pred_img(img, model, dual_head: bool = False, use_autocast: bool = False):
     """
     Returns:
       - pred_label (int)
