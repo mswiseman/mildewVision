@@ -48,7 +48,6 @@ Analyze the full-size leaf disc images and calculate the severity rate and retur
 Given a date, do analysis on all the data collected in that date
 """
 
-
 parser = argparse.ArgumentParser()
 
 # Model parameters
@@ -59,10 +58,12 @@ parser.add_argument('--timestamp', required=True, help='model timestamp')
 parser.add_argument('--outdim', type=int, default=2, help='number of classes')
 parser.add_argument('--model_path', type=str, required=True, help='root path to the model')
 parser.add_argument('--step_size', type=int, default=224, help='step size of sliding window')
-parser.add_argument('--means', type=float, nargs='+', default=[0.504, 0.604, 0.361], help='list of means for each rgb channel')
-parser.add_argument('--stds',  type=float, nargs='+', default=[0.144, 0.142, 0.192], help='list of standard deviations for each rgb channel')
+parser.add_argument('--means', type=float, nargs='+', default=[0.504, 0.604, 0.361],
+                    help='list of means for each rgb channel')
+parser.add_argument('--stds', type=float, nargs='+', default=[0.144, 0.142, 0.192],
+                    help='list of standard deviations for each rgb channel')
 parser.add_argument('--target_class', type=int, default=1, help='target class for saliency mapping')
-parser.add_argument('--contam_control',  action='store_true', help='use contamination control conditional logic')
+parser.add_argument('--contam_control', action='store_true', help='use contamination control conditional logic')
 parser.add_argument('--pm', type=str, help='PM isolate used for inoculation - collected for metadata in the csv')
 
 # CPU/GPU/MSP parameters
@@ -88,6 +89,7 @@ parser.add_argument('--log', type=str, default='../../results/logs/random.log', 
 parser.add_argument('--dpi', type=int, required=True, help='inoculation date')
 parser.add_argument('--group', type=str, default='baseline', help='exp group')
 parser.add_argument('--trays', nargs='+', required=True, help='tray ids')
+parser.add_argument('--dual_head', action='store_true', help='use dual-head model')
 
 # saliency mapping flags
 parser.add_argument('--sal_gradcam', action='store_true', help='make saliency map using gradcam')
@@ -121,6 +123,9 @@ logger = set_logging(Path(str(opt.log)), 20)
 logger.info(os.path.basename(__file__))
 printArgs(logger, vars(opt))
 
+# for dual head models
+dual_head = opt.dual_head
+
 # set paths
 ref_dataset_path = {
     'root_path': Path(opt.dataset_path),
@@ -136,14 +141,13 @@ dataset_path = Path(opt.dataset_path) / image_timestamp
 mask_path = Path(opt.dataset_path) / f'{image_timestamp}_masking'
 model_string = model_type + '_upth' + str(opt.up_threshold) + '_downth' + str(
     opt.down_threshold) + '_' + opt.timestamp
-output_folder = Path(opt.dataset_path).parents[0] / 'results' / 'plot_sal_map_output'/ model_string / image_timestamp
+output_folder = Path(opt.dataset_path).parents[0] / 'results' / 'plot_sal_map_output' / model_string / image_timestamp
 
 # Threshold for severity ratio
 down_th = opt.down_threshold  # below this will be classified as healthy
 up_th = opt.up_threshold  # above this will be classified as infected or conidiophores
 pixel_th = opt.threshold if opt.threshold else []
 overlay_thresh_fixed = float(opt.sal_threshold)
-
 
 rel_th = 0.2  # relative threshold leaf mask
 target_class = int(opt.target_class) if opt.target_class != 'None' else None
@@ -184,6 +188,7 @@ saliency_methods = get_saliency_methods(model,
                                         ref_dataset_path=ref_dataset_path,
                                         image_width=image_width,
                                         transform=preprocess,
+                                        dual_head=False, 
                                         device=device,
                                         partial=True,
                                         explanation_map=False,
@@ -196,11 +201,14 @@ saliency_methods = get_saliency_methods(model,
 key = [f'{x}_sr2' for x in saliency_methods.keys()]
 
 if outdim == 3:
-    META_COL_NAMES = ['timestamp', 'model_type', 'model_timestamp', 'classes', 'step_size', 'imaging_date', 'tray', 'filename', 'up_th', 'down_th', 'sal_threshold', 'clear_patches', 'hyphal_patches', 'conidiophore_patches',
-                  'severity_rate_patch', 'PM', 'time_elapsed'] + key
+    META_COL_NAMES = ['timestamp', 'model_type', 'model_timestamp', 'classes', 'step_size', 'imaging_date', 'tray',
+                      'filename', 'up_th', 'down_th', 'sal_threshold', 'clear_patches', 'hyphal_patches',
+                      'conidiophore_patches',
+                      'severity_rate_patch', 'PM', 'time_elapsed'] + key
 
 else:
-    META_COL_NAMES = ['timestamp', 'model_type', 'model_timestamp', 'classes', 'step_size', 'imaging_date', 'tray', 'filename', 'up_th', 'down_th', 'sal_threshold', 'clear_patches', 'hyphal_patches',
+    META_COL_NAMES = ['timestamp', 'model_type', 'model_timestamp', 'classes', 'step_size', 'imaging_date', 'tray',
+                      'filename', 'up_th', 'down_th', 'sal_threshold', 'clear_patches', 'hyphal_patches',
                       'severity_rate_patch', 'PM', 'time_elapsed'] + key
 
 # List all trays
@@ -295,9 +303,12 @@ for tray_id in opt.trays:
                     input_img = preprocess(subim_arr).unsqueeze(0).to(device).requires_grad_(True)
 
                     # Inference (keep grads for saliency)
-                    pred, prob = pred_img(input_img, model)
-                    logits_class = int(pred.item())
-                    prob_value = float(prob[0, 1].detach().cpu().item())
+                    pred, prob, extra = pred_img(input_img, model, dual_head=dual_head)
+
+                    logits_class = int(pred)
+                    if not dual_head:
+                        prob_value = float(prob[0, 1].detach().cpu().item())
+
                     if outdim == 3:
                         prob_value2 = float(prob[0, 2].detach().cpu().item())
 
