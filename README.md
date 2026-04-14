@@ -11,7 +11,7 @@ The code in this repository primarily uses [Pytorch](https://pytorch.org/get-sta
 
 Overview of the training and inference process: <br>
 
-![optuna flow chart](aps2023_visuals/Flowchart_of_Model_Training.svg)
+![flow chart](aps2023_visuals/flowchart_of_modeL_training_v5.png)
 
 # Implementation
 
