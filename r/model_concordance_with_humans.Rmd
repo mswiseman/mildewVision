@@ -1,0 +1,3080 @@
+---
+title: "Blackbird Model Performance Exploration"
+author: "Michele Wiseman"
+date: "2024-01-30"
+output:
+  pdf_document: default
+  html_document: default
+toc: true
+toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Help here: <https://emdelponte.github.io/paper-estimate-app/code.html>
+
+Ideas: - Look at rater severity rate compared done on two separate days (human precision estimates) - Look at saliency ratings vs human ratings
+
+# Set up
+
+```{r load packges, warning=FALSE, echo=FALSE}
+library(ggplot2)
+#install.packages(c("tidyverse"))
+
+library(ggtext)
+library(GGally)
+library(lme4)
+library(tidyverse)
+library(janitor)
+library(plotly)
+library(readxl)
+library(reshape2)
+library(patchwork)
+library(psych)
+library(tidyr)
+#library(epiR)
+library(agricolae)
+library(ggridges)
+library(dplyr)
+library(lubridate)
+library(readr)
+library(purrr)
+library(vroom)
+library(data.table)
+library(here)
+
+```
+
+## Set working directory
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "C:/Users/Intel User/Desktop/blackbird_scripts/r")
+```
+
+
+## Import data
+```{r import data}
+
+getwd() # this should be wherever your Rmd is... the package "here" handles that
+
+correlation_matrix_human_v_model <- read_excel("../spreadsheets/correlation_matrix_human_v_model_extended_all.xlsx")
+
+# drop time stamp column
+correlation_matrix_human_v_model <- correlation_matrix_human_v_model %>%
+  select(-timestamp)
+
+#View(correlation_matrix_human_v_model)
+```
+
+## Concatenate blackbird data
+```{r concat blackbird results}
+find_csv_files <- function(root_path) {
+  list.files(root_path, pattern = "\\.csv$", recursive = TRUE, full.names = TRUE)
+}
+
+
+remove_column_from_csv <- function(file_path, column_name) {
+  df <- read_csv(file_path, show_col_types = FALSE)
+
+  # convert timestamp BEFORE concat
+  if ("timestamp" %in% names(df)) {
+    ts_chr <- as.character(df$timestamp)
+
+    # matches "1/24/2026 17:32"
+    parsed <- mdy_hm(ts_chr, tz = "UTC", quiet = TRUE)
+
+    # fallback if some rows include seconds like "1/24/2026 17:32:10"
+    if (any(is.na(parsed)) && any(grepl(":\\d\\d$", ts_chr))) {
+      parsed2 <- mdy_hms(ts_chr, tz = "UTC", quiet = TRUE)
+      parsed[is.na(parsed)] <- parsed2[is.na(parsed)]
+    }
+
+    df$timestamp <- parsed
+  }
+
+  # remove unwanted column (works even for name "0")
+  if (column_name %in% names(df)) {
+    df <- df[, names(df) != column_name, drop = FALSE]
+  }
+
+  df %>% filter(!if_all(everything(), is.na))
+}
+
+main <- function() {
+  root_paths <- c("C:/Users/Intel User/Desktop/blackbird_scripts/data/Results")
+  column_to_remove <- "0"
+  output_file <- "../spreadsheets/grid_search_concatenated_results.csv"
+
+  all_csv_files <- unlist(lapply(root_paths, find_csv_files))
+  message("Found ", length(all_csv_files), " CSV files")
+
+  modified_dfs <- map(all_csv_files, ~ remove_column_from_csv(.x, column_to_remove))
+  concatenated_df <- bind_rows(modified_dfs)
+
+  write_csv(concatenated_df, output_file)
+  message("Concatenated file created: ", output_file)
+
+  concatenated_df
+}
+
+concatenated_df <- main()
+head(concatenated_df)
+
+# if up_th exists, put those values in infected threshold and remove that column
+concatenated_df <- concatenated_df %>%
+  mutate(
+    infected_threshold = ifelse(!is.na(up_th), up_th, infected_threshold)
+  ) %>%
+  select(-up_th)
+
+concatenated_df <- concatenated_df %>%
+  mutate(
+    healthy_threshold = ifelse(!is.na(down_th), down_th, healthy_threshold)
+  ) %>%
+  select(-down_th)
+
+
+```
+## Data tidying
+```{r data tidying}
+
+# rename infected_threshold colname to up_th
+colnames(concatenated_df)[which(names(concatenated_df) == "infected_threshold")] <- "up_th"
+
+# rename healthy_threshold colname to down_th
+colnames(concatenated_df)[which(names(concatenated_df) == "healthy_threshold")] <- "down_th"
+
+# change model_timestamp to identifier
+colnames(concatenated_df)[which(names(concatenated_df) == "model_timestamp")] <- "identifier"
+
+#remove timestamp column
+concatenated_df <- concatenated_df %>%
+  select(-timestamp)
+
+# change classes from 2 to 3 if model identifier is Jan22_10-21-00_2026
+concatenated_df <- concatenated_df %>%
+  mutate(classes = ifelse(identifier == "Jan22_10-21-00_2026", 3, classes)) %>%
+  mutate(classes = ifelse(identifier == "Jan26_23-15-35_2026", 3, classes)) %>%
+  mutate(classes = ifelse(identifier == "Jan29_22-02-46_2026", 3, classes))
+
+
+concatenated_df <- concatenated_df %>%
+  select(-time_elapsed)
+
+
+# deduplicate any duplicate rows
+concatenated_df <- concatenated_df %>%  distinct()
+
+
+# add column model_type between timestamp and identifier. populate with "computer_vision"
+concatenated_df <- concatenated_df %>%
+  mutate(model_type = "computer_vision", .before = identifier)
+
+cols_to_keep <- names(correlation_matrix_human_v_model)
+
+concatenated_df_trimmed <- concatenated_df %>%
+  select(any_of(c(cols_to_keep, "inf_gate", "spor_th","GradCAM_sr2", "DeepLift_sr2")))
+
+combined <- bind_rows(
+  correlation_matrix_human_v_model %>% mutate(across(everything(), as.character)),
+  concatenated_df_trimmed %>% mutate(across(everything(), as.character))
+)
+
+# populate percent_healthy, percent_hyphae, percent_conidiophores, and percent_infected
+
+combined <- combined %>%
+  mutate(
+    # turn "-" and "" into NA for the patch columns, then parse as numbers
+    across(
+      c(clear_patches, hyphal_patches, conidiophore_patches),
+      ~ readr::parse_number(na_if(na_if(as.character(.x), "-"), ""))
+    ),
+    total_patches = clear_patches + hyphal_patches + conidiophore_patches,
+
+    percent_infected = if_else(
+      model_type == "computer_vision" & !is.na(total_patches) & total_patches > 0,
+      100 * ((hyphal_patches + conidiophore_patches) / total_patches),
+      readr::parse_number(na_if(na_if(as.character(percent_infected), "-"), ""))
+    ),
+
+    percent_healthy = if_else(
+      model_type == "computer_vision" & !is.na(total_patches) & total_patches > 0,
+      100 - percent_infected,
+      readr::parse_number(na_if(na_if(as.character(percent_healthy), "-"), ""))
+    ),
+
+    percent_hyphae = if_else(
+      model_type == "computer_vision" & !is.na(total_patches) & total_patches > 0,
+      100 * (hyphal_patches / total_patches),
+      readr::parse_number(na_if(na_if(as.character(percent_hyphae), "-"), ""))
+    ),
+
+    percent_conidiophores = if_else(
+      model_type == "computer_vision" & !is.na(total_patches) & total_patches > 0,
+      100 * (conidiophore_patches / total_patches),
+      readr::parse_number(na_if(na_if(as.character(percent_conidiophores), "-"), ""))
+    )
+  ) %>%
+  select(-total_patches)
+
+```
+
+## Skip the chunk below unless running grid search
+I've set it to eval=FALSE so it won't run -- change it back if you need it. 
+
+```{r pivoting table, eval=FALSE}
+
+# Count unique values for identifier
+n_unique_filenames <- combined %>%
+  dplyr::group_by(identifier) %>%
+  dplyr::summarize(unique_filenames = n_distinct(filename))
+
+View(n_unique_filenames)
+
+# select only file names that are found in Feb14_15-53-04_2024 model across all models
+unique_filenames <- combined %>%
+ # dplyr::filter(identifier == "Jan22_10-21-00_2026") %>%
+  dplyr::select(filename) %>%
+  dplyr::distinct()
+
+# filter combined to only include these filenames
+common_files <- combined %>%
+  dplyr::filter(filename %in% unique_filenames$filename)
+
+
+# are there any identifiers who dont have all of these filenames?
+n_unique_filenames <- common_files %>%
+  dplyr::group_by(identifier) %>%
+  dplyr::summarize(unique_filenames = n_distinct(filename))
+
+# I want to remove any rows that don't have a complete set of ratings from all raters
+all_ids <- sort(unique(common_files$identifier))
+
+complete_files <- common_files %>%
+  dplyr::distinct(filename, identifier) %>%   # avoid double-counting
+  dplyr::count(filename, name = "n_ids") %>%
+  dplyr::filter(n_ids == length(all_ids)) %>%
+  dplyr::pull(filename)
+
+common_files_complete <- common_files %>%
+  dplyr::filter(filename %in% complete_files)
+
+```
+
+## More data tidying
+```{r data tidying rnd 2}
+
+# select only the relevant columns
+correlation_matrix_human_v_model_filtered_select <- combined %>%
+        dplyr::select(filename, identifier, model_type, tray, classes, up_th, down_th, spor_th, inf_gate, sal_threshold, severity_rate_patch) %>%
+        dplyr::filter(!is.na(severity_rate_patch))
+
+
+# if the filename doesnt end in "5dpi" or "10dpi", then append this information to the filename from the tray column
+correlation_matrix_human_v_model_filtered_select <- correlation_matrix_human_v_model_filtered_select %>%
+  dplyr::mutate(filename = dplyr::case_when(
+    grepl("5dpi", filename) ~ filename,
+    grepl("10dpi", filename) ~ filename,
+    TRUE ~ paste0(filename, "_", tray)
+  ))
+
+correlation_matrix_human_v_model_filtered_select2 <- correlation_matrix_human_v_model_filtered_select %>%
+  dplyr::mutate(
+    up_th_num = suppressWarnings(as.numeric(up_th)),
+    identifier = dplyr::if_else(
+      !is.na(up_th_num),                      # only if it's numeric
+      paste0(identifier, "_up", up_th),         # append original value
+      identifier                              # otherwise leave unchanged
+    )
+  ) %>%
+  dplyr::mutate(
+    down_th_num = suppressWarnings(as.numeric(down_th)),
+    identifier = dplyr::if_else(
+      !is.na(down_th_num),                      # only if it's numeric
+      paste0(identifier, "_dwn", down_th),         # append original value
+      identifier                              # otherwise leave unchanged
+      )) %>%
+    dplyr::mutate(
+    inf_gate_num = suppressWarnings(as.numeric(inf_gate)),
+    identifier = dplyr::if_else(
+      !is.na(inf_gate_num),                      # only if it's numeric
+      paste0(identifier, "_infg", inf_gate),         # append original value
+      identifier                              # otherwise leave unchanged
+      )) %>%
+    dplyr::mutate(
+      spor_th_num = suppressWarnings(as.numeric(spor_th)),
+      identifier = dplyr::if_else(
+      !is.na(spor_th_num),                      # only if it's numeric
+      paste0(identifier, "_spth", spor_th),         # append original value
+      identifier                              # otherwise leave unchanged
+      )) %>%
+    dplyr::mutate(
+      sal_th_num = suppressWarnings(as.numeric(sal_threshold)),
+      identifier = dplyr::if_else(
+        !is.na(sal_th_num),                      # only if it's numeric
+        paste0(identifier, "_salth", sal_threshold),         # append original value
+        identifier                             # otherwise leave unchanged
+        )) %>%
+dplyr::select(c(-up_th_num, -down_th_num, -inf_gate_num, -spor_th_num, -sal_th_num))
+
+unique(correlation_matrix_human_v_model_filtered_select2$identifier)
+
+
+correlation_matrix_human_v_model_filtered_select2 <- correlation_matrix_human_v_model_filtered_select2 %>%
+  dplyr::select(filename, identifier, model_type, classes, severity_rate_patch)
+
+write.csv(correlation_matrix_human_v_model_filtered_select2, "../spreadsheets/human_vs_model_long_data_grid.csv")
+
+
+correlation_matrix_human_v_model_filtered_select2 %>%
+  count(filename, identifier, model_type) %>%
+  filter(n > 1) %>%
+  arrange(desc(n))
+
+#View(correlation_matrix_human_v_model_filtered_select2)
+
+
+correlation_matrix_human_v_model_filtered_select3 <- correlation_matrix_human_v_model_filtered_select2 %>%
+  dplyr::filter(identifier %in% c("MW",
+                                 "DG",
+                                 "NW",
+                                 "TB",
+                                 "BR",
+                                 "CC",
+                                 "DG",
+                                 #"Jan22_10-21-00_2026_up0.95_dwn0.3_infg0.3_spth0.5_salth0.5",
+                                 #"Jan22_10-21-00_2026_up0.95_dwn0.3_infg0.3_spth0.7_salth0.7",
+                                 "Jan26_23-15-35_2026_up0.95_dwn0.3_infg0.3_spth0.5_salth0.5",
+                                 "Jan26_23-15-35_2026_up0.95_dwn0.2_infg0.3_spth0.5_salth0.7",
+                                 #"Feb03_16-24-20_2024_up0.8_dwn0.3_salth0.7",
+                                 #"Feb14_15-53-04_2024_up0.8_dwn0.3_salth0.7",
+                                 "Jan29_22-02-46_2026_up0.55_dwn0.15_infg0.3_spth0.65_salth0.5"
+                                 ))
+
+unique(correlation_matrix_human_v_model_filtered_select3$identifier)
+
+library(data.table)
+
+tmp <- correlation_matrix_human_v_model_filtered_select3 %>%
+  mutate(
+    severity_rate_patch = readr::parse_number(
+      na_if(as.character(severity_rate_patch), "-")
+    )
+  )
+
+#dt <- as.data.table(tmp)
+
+#dt_nodups <- dt[, if (.N == 1) .SD, by = .(filename, identifier, model_type)]
+
+
+# pivot the table
+data_wide <- dcast(
+  as.data.table(tmp),
+  filename ~ identifier + model_type,
+  value.var = "severity_rate_patch",
+  fun.aggregate = mean,
+  na.rm = TRUE
+)
+
+##data_wide <- dcast(
+#  dt_nodups,
+#  filename ~ identifier + model_type,
+#  value.var = "severity_rate_patch"
+#)
+
+write.csv(data_wide, "../spreadsheets/human_vs_model_wide_data_grid.csv")
+
+# drop columns that start with Feb01_ or Aug31_ *these are old model versions that we dont want to include in the analysis*
+data_wide_na_rm <- data_wide %>%
+  dplyr::select(-dplyr::matches("^(Feb01_|Aug31_|Feb03_04)")) %>%
+  dplyr::select(-dplyr::matches("May11_00-29-56_2021")) # remove this specific column
+
+
+data_wide_na_rm_reordered <- data_wide_na_rm %>%
+  dplyr::select(
+    -dplyr::ends_with("_computer_vision"),
+    -dplyr::ends_with("_human"),
+    dplyr::ends_with("_computer_vision"),
+    dplyr::ends_with("_human")
+  )
+
+
+write.csv(data_wide_na_rm_reordered, "../spreadsheets/human_vs_model_wide_data_grid.csv")
+
+
+# drop Dave since he didnt recieve great instructions
+data_wide_na_rm_reordered <- data_wide_na_rm_reordered %>%
+  dplyr::select(-dplyr::matches("DG_human"))
+  
+
+# Average out the human ratings
+data_wide_na_rm_reordered_humans_averaged <- data_wide_na_rm_reordered %>%
+  dplyr::mutate(
+    mean_human_severity   = rowMeans(dplyr::select(., dplyr::matches("_human")), na.rm = TRUE),
+    median_human_severity = apply(dplyr::select(., dplyr::matches("_human")), 1, median, na.rm = TRUE),
+    sd_human_severity     = apply(dplyr::select(., dplyr::matches("_human")), 1, sd, na.rm = TRUE),
+    n_humans              = rowSums(!is.na(dplyr::select(., dplyr::matches("_human"))))
+  ) %>%
+  # remove any NaN
+  drop_na()
+
+# rename BR_Human to Human_Rater1; CC_Human to Human_Rater2; MW_Human to Human_Rater3; NW_Human to Human_Rater4; TB_Human to Human_Rater5
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("BR_human", "Human_Rater1", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("CC_human", "Human_Rater2", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("MW_human", "Human_Rater3", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("NW_human", "Human_Rater4", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("TB_human", "Human_Rater5", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("mean_human_severity", "Mean_Human_Rating", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("median_human_severity", "Median_Human_Rating", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("Jan22_10-21-00_2026_up0.95_dwn0.3_infg0.3_spth0.7_salth0.7_computer_vision", "Jan22_10-21-00_2026_sal0.7", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("Feb03_16-24-20_2024_up0.8_dwn0.3_salth0.7_computer_vision", "Feb03_16-24-20_2024", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("Feb14_15-53-04_2024_up0.8_dwn0.3_salth0.7_computer_vision", "Feb14_15-53-04_2024", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("Jan26_23-15-35_2026_up0.95_dwn0.2_infg0.3_spth0.5_salth0.7_computer_vision", "Jan26_23-15-35_2026_sal0.7", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("Jan26_23-15-35_2026_up0.95_dwn0.3_infg0.3_spth0.5_salth0.5_computer_vision", "Jan26_23-15-35_2026_sal0.5", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("Jan22_10-21-00_2026_up0.95_dwn0.3_infg0.3_spth0.5_salth0.5_computer_vision", "Jan22_10-21-00_2026_sal0.5", colnames(data_wide_na_rm_reordered_humans_averaged))
+colnames(data_wide_na_rm_reordered_humans_averaged) <- gsub("Jan29_22-02-46_2026_up0.55_dwn0.15_infg0.3_spth0.65_salth0.5", "Jan29_22-02-46_2026_sal0.5", colnames(data_wide_na_rm_reordered_humans_averaged))
+
+
+View(data_wide_na_rm_reordered_humans_averaged)
+
+```
+
+# ------------------------------
+
+## Pairs plot with Pearson's Corr. Coeff.
+Human v model correlation matrices. 
+```{r, prep and viz, pearsons correlation, warning=FALSE}
+
+  
+  lower.panel <- function(x, y){
+    points(x, y, pch = 19)
+  
+    r <- round(cor(x, y), 2)
+    txt <- sprintf("R = %.2f", r)
+  
+    # limit to 17 characters (truncate if longer)
+    txt <- substr(txt, 1, 17)
+  
+  
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+  
+    x0 <- 0.5
+    y0 <- 0.9
+    off <- 0.01     # outline thickness
+    cex_txt <- 1.5   # text size
+    outline_col <- "black"
+  
+    # 8-direction outline offsets
+    offsets <- matrix(c(
+      -off,  0,
+       off,  0,
+       0,   -off,
+       0,    off,
+      -off, -off,
+      -off,  off,
+       off, -off,
+       off,  off
+    ), ncol = 2, byrow = TRUE)
+  
+    # draw outline
+    for(i in 1:nrow(offsets)){
+      text(x0 + offsets[i, 1], y0 + offsets[i, 2],
+           txt, col = outline_col, font = 2, cex = cex_txt)
+    }
+  
+    # draw main text on top
+    text(x0, y0, txt, col = "#00E5FF", font = 2, cex = cex_txt)
+  }
+  
+  
+  df_plot <- data_wide_na_rm_reordered_humans_averaged %>%
+    select(-n_humans, -sd_human_severity)   # keep filename, drop stats you don't want
+  
+  df_pairs <- df_plot %>%
+    select(-filename) %>%
+    select(where(is.numeric))
+  
+  # truncate column names to 17 characters
+  colnames(df_pairs) <- substr(colnames(df_pairs), 1, 12)
+  
+  
+  library(Cairo)
+  
+  CairoPDF("../figs_for_pub/correlation_plots/pairs_plot_human_vs_model_grid.pdf",
+           width = 12, height = 12,
+           family = "Arial")
+
+labels_17 <- substr(colnames(df_pairs), 1, 12)
+
+pairs(
+  df_pairs,
+  labels = labels_17,
+  upper.panel = NULL,
+  lower.panel = lower.panel,
+  cex.labels = 1.4
+)
+  
+  dev.off()
+
+
+#pairs(data_wide_na_rm_reordered_humans_averaged[,c(6,25:37)], upper.panel = NULL, lower.panel = lower.panel)
+
+
+#select_comp<-data_wide_na_rm_reordered_humans_averaged %>%
+#  select(1,6,8,17)
+
+#pairs(select_comp[,2:4], upper.panel = NULL, lower.panel = lower.panel)
+
+
+```
+
+## Print out top correlations (Human v patch severity model outputs)
+
+```{r}
+
+# 1) Get only the computer vision columns
+cv_cols <- names(data_wide_na_rm_reordered_humans_averaged) %>%
+  .[grepl("_202", .)]
+
+cv_cols
+
+# 2) Compute correlation vs mean_human_severity for each CV model
+cv_correlations <- tibble(model = cv_cols) %>%
+  mutate(
+    correlation = sapply(model, function(col) {
+      cor(
+        data_wide_na_rm_reordered_humans_averaged[[col]],
+        data_wide_na_rm_reordered_humans_averaged$Mean_Human_Rating,
+        use = "pairwise.complete.obs"
+      )
+    })
+  ) %>%
+  arrange(desc(abs(correlation)))  # sort by strongest correlation (positive or negative)
+
+# 3) Print top 5
+cv_correlations %>% slice(1:50)
+
+
+
+```
+
+# Inter-rater reliability
+
+```{r}
+
+#### Human inter-rater reliability (ICC) ######
+df <- data_wide_na_rm_reordered_humans_averaged %>%
+  select(filename, starts_with("Human_Rater"), everything())
+
+human_cols <- names(df) %>% str_subset("^Human_Rater\\d+$")
+
+cv_cols <- df %>%
+  select(-all_of(human_cols), -filename) %>%
+  select(where(is.numeric)) %>%
+  names() %>%
+  .[. != "Mean_Human_Rating" & . != "Median_Human_Rating" & . != "sd_human_severity" & . != "n_humans"]
+
+human_cols
+cv_cols
+
+
+
+# Calculate ICC for human raters
+human_mat <- df %>% select(all_of(human_cols))
+
+# ICC(2,1) and ICC(2,k) are common when raters are considered a random sample
+icc_out <- psych::ICC(human_mat)
+
+print(icc_out)
+
+# Calculate ICC for CV models (not that informative tbh)
+cv_mat <- df %>% select(all_of(cv_cols))
+icc_out_cv <- psych::ICC(cv_mat)
+print(icc_out_cv)
+```
+
+
+
+## Rater difference vs image difference
+
+
+```{r}
+
+##### rater difference vs image difference #####
+
+df_long_humans <- df %>%
+  pivot_longer(cols = all_of(human_cols), names_to = "rater", values_to = "human_score")
+
+df_long_humans <- df_long_humans %>%
+  dplyr::select(
+    -all_of(c(
+      #"Jan22_10-21-00_2026_sal0.5",
+     # "Jan22_10-21-00_2026_sal0.7",
+      "Jan26_23-15-35_2026_sal0.5",
+      "Jan29_22-02-46_2026_sal0.5_computer_vision"
+    ))
+  )
+
+m_human_vc <- lmer(human_score ~ 1 + (1|filename) + (1|rater), data = df_long_humans, REML = TRUE)
+summary(m_human_vc)
+
+# Variance components
+vc <- as.data.frame(VarCorr(m_human_vc))
+vc
+
+var_image <- vc %>% filter(grp == "filename") %>% pull(vcov)
+var_rater <- vc %>% filter(grp == "rater")    %>% pull(vcov)
+var_resid <- attr(VarCorr(m_human_vc), "sc")^2
+total_var <- var_image + var_rater + var_resid
+
+tibble(
+  component = c("image", "rater", "residual"),
+  variance  = c(var_image, var_rater, var_resid),
+  pct       = 100 * variance / total_var
+)
+```
+
+So it looks like 84.8% of variance is due to differences between images, 2.83% is due to raters, and 12.3% is residual. 
+
+## Concordance of each CV model with humans
+```{r}
+#### Agreement of each CV model with humans ####
+
+str(df)
+
+df_human_summary <- df %>%
+  mutate(
+    human_mean = rowMeans(across(all_of(human_cols)), na.rm = TRUE),
+    human_sd   = apply(select(., all_of(human_cols)), 1, sd, na.rm = TRUE)
+  )
+```
+
+### Functions you dont need to re-run (below)
+Below is ccc function
+```{r}
+metric_vs_reference <- function(pred, ref) {
+  ok <- is.finite(pred) & is.finite(ref)
+  pred <- pred[ok]; ref <- ref[ok]
+
+  ccc <- tryCatch(DescTools::CCC(pred, ref)$rho.c[1], error = function(e) NA_real_)
+
+  tibble(
+    n    = length(ref),
+    CCC  = as.numeric(ccc),
+    cor  = as.numeric(cor(pred, ref)),
+    MAE  = mean(abs(pred - ref)),
+    RMSE = sqrt(mean((pred - ref)^2)),
+    bias = mean(pred - ref)
+  )
+}
+
+```
+
+## Bland-Altman, individual correlation plots, relationship between cv error and human error
+```{r}
+
+cv_vs_mean_tbl <- purrr::map_dfr(cv_cols, \(cv) {
+  out <- metric_vs_reference(
+    dplyr::pull(df_human_summary, all_of(cv)),
+    df_human_summary$human_mean
+  )
+  out$model <- cv
+  out
+}) %>%
+  dplyr::relocate(model)
+
+cv_vs_mean_tbl
+
+
+cv_vs_each_human <- expand_grid(model = cv_cols, rater = human_cols) %>%
+  mutate(metrics = map2(model, rater, \(m, r) {
+    metric_vs_reference(df[[m]], df[[r]])
+  })) %>%
+  unnest(metrics)
+
+cv_vs_each_human
+
+cv_vs_each_human2 <- cv_vs_each_human %>%
+  mutate(
+    CCC  = map_dbl(CCC,  ~ .x[1]),
+    cor  = map_dbl(cor,  ~ .x[1]),
+    MAE  = map_dbl(MAE,  ~ .x[1]),
+    RMSE = map_dbl(RMSE, ~ .x[1]),
+    bias = map_dbl(bias, ~ .x[1])
+  )
+
+cv_vs_each_human2 %>%
+  dplyr::filter(!rater %in% c("Mean_Human_Rating", "Median_Human_Rating")) %>%
+  group_by(model) %>%
+  summarize(
+    CCC_mean = mean(CCC, na.rm = TRUE),
+    CCC_sd   = sd(CCC,  na.rm = TRUE),
+    MAE_mean = mean(MAE, na.rm = TRUE),
+    RMSE_mean= mean(RMSE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+##### Plots: CV vs human mean + Bland–Altman ######
+
+plot_scatter_with_cor <- function(cv_name, df) {
+
+  d <- df %>%
+    dplyr::select(Mean_Human_Rating, !!rlang::sym(cv_name)) %>%
+    rename(cv = !!rlang::sym(cv_name)) %>%
+    tidyr::drop_na()
+  
+  r <- suppressWarnings(cor(d$Mean_Human_Rating, d$cv))
+
+  short_name <- ifelse(
+    nchar(cv_name) > 19,
+    paste0(substr(cv_name, 1, 19), ""),
+    cv_name
+  )
+
+  ggplot(d, aes(x = Mean_Human_Rating, y = cv)) +
+    geom_point(alpha = 0.6) +
+    geom_abline(intercept = 0, slope = 1) +
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(
+      title = expression(bold("A.")~Mean~Expert~Severity~Rating~vs.~Model),
+      x = "Mean of Expert Disease Severity Rating",
+      y = "Model Severity Rating",
+      subtitle = paste0(
+  short_name, " | r = ", sprintf("%.3f", r),
+  " | n = ", nrow(d))
+    ) +
+    theme_classic()
+}
+
+wrap_plots(lapply(cv_cols, plot_scatter_with_cor, df = df))
+
+
+```
+
+
+
+```{r}
+plot_ba_panel <- function(df, cv_name) {
+  d <- df %>%
+    transmute(
+      mean_xy = (human_mean + .data[[cv_name]])/2,
+      diff_xy = .data[[cv_name]] - human_mean
+    ) %>%
+    drop_na()
+
+  bias <- mean(d$diff_xy)
+  loa  <- bias + c(-1, 1) * 1.96 * sd(d$diff_xy)
+  
+  short_name <- ifelse(
+  nchar(cv_name) > 19,
+  paste0(substr(cv_name, 1, 19), ""),
+  cv_name)
+
+  ggplot(d, aes(mean_xy, diff_xy)) +
+    geom_point(alpha = 0.6) +
+    geom_hline(yintercept = bias) +
+    geom_hline(yintercept = loa[1], linetype = 2) +
+    geom_hline(yintercept = loa[2], linetype = 2) +
+    labs(
+      title = expression(bold("B.")~Bland~-~Altman),
+      subtitle = paste0(
+        short_name,
+        "  |  Bias=", sprintf("%.2f", bias),
+        "  |  LoA=[", sprintf("%.2f", loa[1]), ", ", sprintf("%.2f", loa[2]), "]"
+      ),
+      x = "Mean of (Expert Mean, Model) (%)",
+      y = "Model − Expert Mean (%)"
+    ) +
+    theme_classic()
+}
+
+# helper to make safe filenames
+safe_name <- function(x) str_replace_all(x, "[^A-Za-z0-9_\\-]+", "_")
+
+save_model_agreement_plots <- function(df, cv_cols, out_dir = "agreement_plots",
+                                       width = 10, height = 5, dpi = 300,
+                                       also_pdf = TRUE) {
+  dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+  for (cv_name in cv_cols) {
+    pA <- plot_scatter_with_cor(cv_name, df)
+    pB <- plot_ba_panel(df, cv_name)
+
+    p  <- pA + pB + plot_layout(ncol = 2)
+
+    fn_base <- file.path(out_dir, paste0("human_vs_", safe_name(cv_name)))
+
+    ggsave(paste0(fn_base, ".png"), plot = p, width = width, height = height, dpi = dpi)
+    if (also_pdf) {
+      ggsave(paste0(fn_base, ".pdf"), plot = p, width = width, height = height)
+    }
+  }
+
+  invisible(TRUE)
+}
+
+
+
+
+p_ba <- wrap_plots(lapply(cv_cols, function(x) plot_ba_panel(df_human_summary, x)))
+print(p_ba)
+
+logit01 <- function(x, eps = 0.001) {
+  # x in 0..100 -> p in (0,1)
+  p <- pmin(pmax(x/100, eps), 1 - eps)
+  qlogis(p)
+}
+inv_logit01 <- function(z) 100 * plogis(z)
+
+
+fit_human_on_cv <- function(cv_name) {
+  d <- df %>%
+    select(filename, all_of(human_cols), all_of(cv_name)) %>%
+    pivot_longer(all_of(human_cols), names_to = "rater", values_to = "human_score") %>%
+    mutate(cv_score = .data[[cv_name]]) %>%
+    drop_na(human_score, cv_score) %>%
+    mutate(
+      y = logit01(human_score),
+      x = logit01(cv_score)
+    )
+
+  # random intercepts for image + rater
+  lmer(y ~ x + (1|filename) + (1|rater), data = d, REML = TRUE)
+}
+
+models_human_on_cv <- setNames(lapply(cv_cols, fit_human_on_cv), cv_cols)
+
+lapply(models_human_on_cv, summary)
+
+##### Does CV struggle when humans disagree? #########
+
+cv_error_vs_disagreement <- function(cv_name) {
+df_human_summary %>%
+  tidyr::pivot_longer(
+    cols = all_of(cv_cols),
+    names_to = "cv_name",
+    values_to = "cv"
+  ) %>%
+  mutate(abs_err = abs(cv - human_mean)) %>%
+  ggplot(aes(x = human_sd, y = abs_err)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ cv_name) +
+  labs(
+    title = "Absolute CV error vs Human disagreement",
+    x = "Human SD across 5 raters",
+    y = "|CV − Human mean|"
+  ) +
+      theme_classic()
+}
+
+
+wrap_plots(lapply(cv_cols, function(x) plot_ba_panel(df_human_summary, x)))
+save_model_agreement_plots(df_human_summary, cv_cols, out_dir = "agreement_plots")
+list.files("agreement_plots")
+browseURL(file.path(getwd(), "agreement_plots"))
+
+cv_error_vs_disagreement(cv_name)
+
+
+# quantile regression
+# looks like error variance increases with rater disagreement
+# worst errors are likely conditional on label ambiguity, not model instability
+df_human_summary %>%
+  tidyr::pivot_longer(
+    cols = all_of(cv_cols),
+    names_to = "cv_name",
+    values_to = "cv"
+  ) %>%
+  mutate(abs_err = abs(cv - human_mean)) %>%
+    ggplot(., aes(human_sd, abs_err)) +
+    geom_point(alpha = 0.3) +
+    geom_quantile(quantiles = c(0.25, 0.5, 0.75), color = "blue") +
+    facet_wrap(~ cv_name) +
+    labs(
+      title = "Quantile structure of CV error vs human disagreement",
+      x = "Human SD",
+      y = "|CV − Human mean|"
+      ) +
+    theme_classic()
+
+df_long <- df_human_summary %>%
+  tidyr::pivot_longer(
+    cols = all_of(cv_cols),
+    names_to = "cv_name",
+    values_to = "cv"
+    ) %>%
+  mutate(abs_err = abs(cv - human_mean))
+
+# not sure a linear model works here
+lm_fit <- lm(abs_err ~ human_sd, data = df_long)
+
+ggplot(df_long, aes(human_sd, resid(lm_fit))) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(
+  method = "gam",
+  formula = y ~ s(x, k = 5),
+  se = TRUE)+
+  theme_classic()
+
+# does the model disagree more at times when humans disagree with each other? 
+# x axis is human sd deviation (ie when humans agree more)
+# y axis is the mean absolute difference between the model and the sd bin
+df_long %>%
+  mutate(sd_bin = cut(human_sd, breaks = 10)) %>%
+  ggplot(aes(x = sd_bin, y = abs_err)) +
+  stat_summary(fun = mean, geom = "point", size = 2) +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.2) +
+  facet_wrap(~ cv_name) +
+  labs(
+    x = "Expert SD (Binned)",
+    y = "Mean |Model − Expert Mean|"
+  ) +
+  theme_classic()
+                                        
+disagreement_concordance <- function(cv_name_value,
+                                     out_dir = "disagreement_concordance",
+                                     width = 3, height = 4, dpi = 300,
+                                     save_pdf = TRUE) {
+
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+  p <- df_long %>%
+    dplyr::filter(.data$cv_name == cv_name_value) %>%
+    dplyr::mutate(sd_bin = cut(.data$human_sd, breaks = 10)) %>%
+    ggplot2::ggplot(ggplot2::aes(x = sd_bin, y = .data$abs_err)) +
+    ggplot2::stat_summary(fun = mean, geom = "point", size = 2) +
+    ggplot2::stat_summary(fun.data = ggplot2::mean_cl_boot, geom = "errorbar", width = 0.2) +
+    ggplot2::labs(
+      x = "Human Expert SD (binned)",
+      y = "|Model − Human Expert Mean|"
+    ) +
+    ylim(0,30) +
+    ggplot2::theme_classic() +
+    ggplot2::theme(axis.text = ggplot2::element_text(angle = 45, hjust = 1))
+
+  safe <- gsub("[^A-Za-z0-9_\\-]+", "_", cv_name_value)
+  png_path <- file.path(out_dir, paste0("disagreement_concord_", safe, ".png"))
+  ggplot2::ggsave(png_path, p, width = width, height = height, dpi = dpi)
+
+  if (isTRUE(save_pdf)) {
+    pdf_path <- file.path(out_dir, paste0("disagreement_concord_", safe, ".pdf"))
+    ggplot2::ggsave(pdf_path, p, width = width, height = height, device = cairo_pdf)
+  }
+
+  return(p)
+}
+
+invisible(lapply(unique(df_long$cv_name), disagreement_concordance))
+
+# For most bins, the model’s mean absolute deviation from the human expert mean is small relative to the level of inter-rater variability observed among human experts.
+
+ggplot(df_long, aes(human_sd, abs_err)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "gam", formula = y ~ s(x, k = 5), se = TRUE) +
+  theme_classic()
+
+
+```
+
+Absolute prediction error increased nonlinearly with human rater disagreement. When raters largely agreed, model error was small and tightly bounded. In contrast, large errors occurred primarily at high disagreement levels, indicating that model performance is constrained by annotation uncertainty rather than systematic prediction bias.
+
+## Investigate leave-one-out human CCC
+The problem with relying on any given human is that one human clearly cannot define ground truth (this feels like a philosophical statement, but it's true...). 
+
+```{r}
+ccc_safe <- function(x, y) {
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 3) return(NA_real_)
+
+  out <- DescTools::CCC(x[ok], y[ok])
+
+  # DescTools::CCC sometimes returns a list/data frame; extract robustly
+  rho <- out$rho.c
+  if (is.null(rho) && is.data.frame(out)) {
+    # fallback if CCC returns a data.frame with column rho.c
+    rho <- out[["rho.c"]][1]
+  }
+
+  as.numeric(rho)[1]
+}
+
+
+loo_consensus_ccc_one_model <- function(df, id_col, rater_cols, model_col) {
+  id_col <- rlang::ensym(id_col)
+
+  folds <- purrr::map(rater_cols, function(withheld) {
+    others <- setdiff(rater_cols, withheld)
+
+    df_fold <- df %>%
+      dplyr::transmute(
+        !!id_col,
+        withheld = withheld,
+        withheld_human = .data[[withheld]],
+        consensus = rowMeans(dplyr::across(dplyr::all_of(others)), na.rm = TRUE),
+        model = .data[[model_col]]
+      )
+
+    pairwise_cccs <- combn(others, 2, simplify = FALSE) %>%
+      purrr::map_dbl(~ ccc_safe(df[[.x[1]]], df[[.x[2]]]))
+
+    tibble::tibble(
+      withheld = withheld,
+      human_ccc = mean(pairwise_cccs, na.rm = TRUE),
+      model_ccc = ccc_safe(df_fold$model, df_fold$consensus)
+    )
+  })
+
+  dplyr::bind_rows(folds) %>%
+    tidyr::pivot_longer(
+      cols = c(human_ccc, model_ccc),
+      names_to = "comparison",
+      values_to = "ccc"
+    ) %>%
+    dplyr::mutate(
+      comparison = dplyr::recode(
+        comparison,
+        human_ccc = "human_vs_consensus",
+        model_ccc = "model_vs_consensus"
+      ),
+      model_name = model_col
+    )
+}
+
+plot_and_save_loo_one_model <- function(df, id_col, rater_cols, model_col,
+                                        out_dir = "loo_ccc_plots",
+                                        width = 10, height = 4, dpi = 300,
+                                        save_pdf = FALSE) {
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+  loo_tbl <- loo_consensus_ccc_one_model(
+    df = df, id_col = {{id_col}},
+    rater_cols = rater_cols,
+    model_col = model_col
+  )
+
+  human_baseline <- loo_tbl %>%
+    dplyr::filter(comparison == "human_vs_consensus") %>%
+    dplyr::summarise(baseline = mean(ccc, na.rm = TRUE)) %>%
+    dplyr::pull(baseline)
+
+  plot_df <- loo_tbl %>%
+    dplyr::mutate(
+      series = dplyr::if_else(
+        comparison == "human_vs_consensus",
+        "Human",
+        model_col
+      )
+    )
+
+  p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = withheld, y = ccc, color = series)) +
+    ggplot2::geom_point(size = 2, alpha = 0.9) +
+    ggplot2::geom_hline(yintercept = human_baseline, linetype = 2) +
+    ggplot2::facet_wrap(~ comparison, scales = "free_y") +
+    ggplot2::labs(
+      title = paste0("LOO CCC: ", model_col),
+      subtitle = paste0("Dashed line = mean peer CCC (", sprintf("%.3f", human_baseline), ")"),
+      x = "Withheld rater",
+      y = "CCC"
+    ) +
+    ggplot2::theme_classic() +
+    ggplot2::theme(legend.position = "bottom")
+
+  safe <- gsub("[^A-Za-z0-9_\\-]+", "_", model_col)
+  png_path <- file.path(out_dir, paste0("loo_ccc_", safe, ".png"))
+
+  ggplot2::ggsave(png_path, p, width = width, height = height, dpi = dpi)
+
+  if (isTRUE(save_pdf)) {
+    pdf_path <- file.path(out_dir, paste0("loo_ccc_", safe, ".pdf"))
+    ggplot2::ggsave(pdf_path, p, width = width, height = height, device = grDevices::cairo_pdf)
+  }
+
+  invisible(list(plot = p, data = loo_tbl, png = png_path))
+}
+
+rater_cols <- c("Human_Rater1", "Human_Rater2", "Human_Rater3", "Human_Rater4", "Human_Rater5")
+
+results <- purrr::map(
+  cv_cols,
+  ~ plot_and_save_loo_one_model(
+    df = df_human_summary,
+    id_col = filename,
+    rater_cols = rater_cols,
+    model_col = .x,
+    out_dir = "loo_ccc_plots",
+    save_pdf = FALSE
+  )
+)
+
+purrr::map_chr(results, "png")
+
+plot_and_save_loo_dumbbell_one_model <- function(df, id_col, rater_cols, model_col,
+                                                 out_dir = "loo_ccc_dumbbell",
+                                                 width = 4.5, height = 3.2, dpi = 300,
+                                                 save_pdf = TRUE) {
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+  loo_tbl <- loo_consensus_ccc_one_model(
+    df = df, id_col = {{id_col}},
+    rater_cols = rater_cols,
+    model_col = model_col
+  )
+
+  wide_tbl <- loo_tbl %>%
+    dplyr::select(withheld, comparison, ccc) %>%
+    tidyr::pivot_wider(names_from = comparison, values_from = ccc) %>%
+    dplyr::rename(
+      human_ccc = human_vs_consensus,
+      model_ccc = model_vs_consensus
+    ) %>%
+    dplyr::mutate(
+      delta_ccc = model_ccc - human_ccc,
+      withheld_lab = gsub("^Human_Rater", "R", withheld)
+    )
+
+  human_baseline <- mean(wide_tbl$human_ccc, na.rm = TRUE)
+
+  out_tbl <- wide_tbl %>%
+    dplyr::mutate(
+      model_name = model_col,
+      human_baseline_mean = human_baseline
+    ) %>%
+    dplyr::select(model_name, withheld, withheld_lab, human_ccc, model_ccc, delta_ccc, human_baseline_mean)
+
+  short_name <- ifelse(
+    nchar(model_col) > 19,
+    paste0(substr(model_col, 1, 19), ""),
+    model_col
+  )
+
+  # long format for colored endpoints
+  endpoints <- out_tbl %>%
+    tidyr::pivot_longer(cols = c(human_ccc, model_ccc),
+                        names_to = "endpoint", values_to = "ccc") %>%
+    dplyr::mutate(endpoint = dplyr::recode(endpoint,
+                                           human_ccc = "Human (peer CCC)",
+                                           model_ccc = "Model"))
+
+  p <- ggplot2::ggplot(out_tbl, ggplot2::aes(y = withheld_lab)) +
+    ggplot2::geom_segment(
+      ggplot2::aes(x = human_ccc, xend = model_ccc, yend = withheld_lab),
+      linewidth = 0.8, color = "grey40", alpha = 0.7
+    ) +
+    ggplot2::geom_point(data = endpoints,
+                        ggplot2::aes(x = ccc, color = endpoint),
+                        size = 2.6) +
+    ggplot2::geom_vline(xintercept = human_baseline, linetype = 2) +
+    ggplot2::scale_color_manual(values = c("Human (peer CCC)" = "salmon",
+                                           "Model" = "steelblue")) +
+    ggplot2::coord_cartesian(xlim = c(0.8, 1.0)) +
+    ggplot2::labs(
+      title = paste0("LOO CCC vs consensus: ", short_name),
+      x = "Concordance correlation coefficient",
+      y = "Withheld rater",
+      color = NULL
+    ) +
+    ggplot2::theme_classic() +
+    ggplot2::theme(legend.position = "bottom")
+
+  safe <- gsub("[^A-Za-z0-9_\\-]+", "_", model_col)
+  png_path <- file.path(out_dir, paste0("loo_dumbbell_", safe, ".png"))
+  csv_path <- file.path(out_dir, paste0("loo_table_", safe, ".csv"))
+
+  ggplot2::ggsave(png_path, p, width = width, height = height, dpi = dpi)
+
+  if (isTRUE(save_pdf)) {
+    pdf_path <- file.path(out_dir, paste0("loo_dumbbell_", safe, ".pdf"))
+    ggplot2::ggsave(pdf_path, p, width = width, height = height, device = grDevices::cairo_pdf)
+  } else {
+    pdf_path <- NA_character_
+  }
+
+  utils::write.csv(out_tbl, csv_path, row.names = FALSE)
+
+  invisible(list(plot = p, loo_long = loo_tbl, loo_table = out_tbl,
+                 png = png_path, pdf = pdf_path, csv = csv_path))
+}
+
+results <- purrr::map(
+  cv_cols,
+  ~ plot_and_save_loo_dumbbell_one_model(
+    df = df_human_summary,
+    id_col = filename,
+    rater_cols = rater_cols,
+    model_col = .x,
+    out_dir = "loo_ccc_dumbbell",
+    save_pdf = FALSE
+  )
+)
+
+purrr::map_chr(results, "png")
+
+
+```
+Model–consensus concordance was consistently high and largely invariant to which rater was withheld, whereas human–consensus concordance varied substantially depending on the rater.
+
+
+Note human_baseline_mean is the mean leave-one-out human–consensus concordance.
+
+## Dumbell plots of LOO vs Model-consensus
+
+```{r}
+plot_and_save_loo_dumbbell_one_model <- function(df, id_col, rater_cols, model_col,
+                                                 out_dir = "loo_ccc_dumbbell",
+                                                 width = 4.5, height = 3.2, dpi = 300,
+                                                 save_pdf = TRUE) {
+
+  # deps: dplyr, tidyr, purrr, ggplot2, rlang, DescTools
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+  # LOO CCC long table (your existing helper)
+  loo_tbl <- loo_consensus_ccc_one_model(
+    df = df, id_col = {{id_col}},
+    rater_cols = rater_cols,
+    model_col = model_col
+  )
+
+  # Wide table: one row per withheld rater
+  wide_tbl <- loo_tbl %>%
+    dplyr::select(withheld, comparison, ccc) %>%
+    tidyr::pivot_wider(names_from = comparison, values_from = ccc) %>%
+    dplyr::rename(
+      human_ccc = human_vs_consensus,
+      model_ccc = model_vs_consensus
+    ) %>%
+    dplyr::mutate(
+      delta_ccc = model_ccc - human_ccc
+    )
+
+  # Baseline (mean human CCC)
+  human_baseline <- wide_tbl %>%
+    dplyr::summarise(b = mean(human_ccc, na.rm = TRUE)) %>%
+    dplyr::pull(b)
+
+  # Add baseline + model name for the CSV (handy for later merges)
+  out_tbl <- wide_tbl %>%
+    dplyr::mutate(
+      model_name = model_col,
+      human_baseline_mean = human_baseline
+    ) %>%
+    dplyr::select(model_name, withheld, human_ccc, model_ccc, delta_ccc, human_baseline_mean)
+  
+  short_name <- ifelse(
+    nchar(model_col) > 19,
+    paste0(substr(model_col, 1, 19), ""),
+    model_col
+  )
+
+  # Plot (dumbbell)
+  p <- ggplot2::ggplot(out_tbl, ggplot2::aes(y = withheld)) +
+    ggplot2::geom_segment(
+      ggplot2::aes(x = human_ccc, xend = model_ccc, yend = withheld),
+      linewidth = 0.8, alpha = 0.7
+    ) +
+    ggplot2::geom_point(ggplot2::aes(x = human_ccc), size = 2.4) +
+    ggplot2::geom_point(ggplot2::aes(x = model_ccc), size = 2.4) +
+    ggplot2::geom_vline(xintercept = human_baseline, linetype = 2) +
+    ggplot2::labs(
+      title = paste0("LOO CCC vs consensus: ", short_name),
+      #subtitle = paste0(
+      #  "Per withheld rater: Human vs consensus (point) and Model vs consensus (point). ",
+      #  "Dashed line = mean human CCC (", sprintf("%.3f", human_baseline), ")."
+      #),
+      x = "Concordance correlation coefficient",
+      y = "Withheld rater"
+    ) +
+    xlim(0.8,1.0)+
+    ggplot2::theme_classic()
+
+  # Safe filenames
+  safe <- gsub("[^A-Za-z0-9_\\-]+", "_", model_col)
+  png_path <- file.path(out_dir, paste0("loo_dumbbell_", safe, ".png"))
+  csv_path <- file.path(out_dir, paste0("loo_table_", safe, ".csv"))
+
+  # Save outputs
+  ggplot2::ggsave(png_path, p, width = width, height = height, dpi = dpi)
+
+  if (isTRUE(save_pdf)) {
+    pdf_path <- file.path(out_dir, paste0("loo_dumbbell_", safe, ".pdf"))
+    ggplot2::ggsave(pdf_path, p, width = width, height = height, device = grDevices::cairo_pdf)
+  } else {
+    pdf_path <- NA_character_
+  }
+
+  utils::write.csv(out_tbl, csv_path, row.names = FALSE)
+
+  invisible(list(plot = p, loo_long = loo_tbl, loo_table = out_tbl,
+                 png = png_path, pdf = pdf_path, csv = csv_path))
+}
+
+rater_cols <- c("Human_Rater1", "Human_Rater2", "Human_Rater3", "Human_Rater4", "Human_Rater5")
+
+results <- purrr::map(
+  cv_cols,
+  ~ plot_and_save_loo_dumbbell_one_model(
+    df = df_human_summary,
+    id_col = filename,
+    rater_cols = rater_cols,
+    model_col = .x,
+    out_dir = "loo_ccc_dumbbell",
+    save_pdf = TRUE
+  )
+)
+
+# paths:
+png_paths <- purrr::map_chr(results, "png")
+csv_paths <- purrr::map_chr(results, "csv")
+
+```
+Figure X. LOO concordance of model and human raters with human consensus.
+Dumbbells show CCC values for each withheld human rater, comparing agreement of the withheld rater and the CV model with the consensus of the remaining raters. The dashed line denotes the mean leave-one-out human–consensus CCC. Across all withheld raters, model concordance matches or exceeds that of individual human raters.
+
+## Make a nice multi-panel figure
+```{r}
+# ---------- Theme ----------
+theme_pub <- function(base_size = 11) {
+  theme_classic(base_size = base_size) +
+    theme(
+      plot.title.position = "plot",
+      plot.title = ggtext::element_markdown(face = "bold"),
+      plot.subtitle = element_text(size = rel(0.95)),
+      axis.text = element_text(color = "black"),
+      strip.background = element_blank(),
+      strip.text = element_text(face = "bold"),
+      legend.position = "none"
+    )
+}
+
+panel_title <- function(letter, title) {
+  paste0("<span style='font-weight:700;'>", letter, "</span> ", title)
+}
+
+make_panel_A <- function(df, model_col) {
+
+  d <- df %>%
+    transmute(
+      x = human_mean,
+      y = .data[[model_col]]
+    ) %>%
+    filter(is.finite(x), is.finite(y))
+
+  r_val   <- cor(d$x, d$y, use = "complete.obs", method = "pearson")
+  ccc_val <- ccc_safe(d$y, d$x)
+
+  ann_text <- paste0(
+    "r = ", sprintf("%.3f", r_val), "\n",
+    "CCC = ", sprintf("%.3f", ccc_val)
+  )
+
+  # Bin x and estimate conditional quantiles
+  q_df <- d %>%
+    mutate(x_bin = cut(x, breaks = seq(0, 100, by = 5), include.lowest = TRUE)) %>%
+    group_by(x_bin) %>%
+    summarise(
+      x_mid = mean(x, na.rm = TRUE),
+      y_med = median(y, na.rm = TRUE),
+      y_lo  = quantile(y, 0.10, na.rm = TRUE),
+      y_hi  = quantile(y, 0.90, na.rm = TRUE),
+      n = n(),
+      .groups = "drop"
+    ) %>%
+    filter(n >= 3)
+
+  # Smooth the envelope
+  q_grid <- tibble(x_mid = seq(min(q_df$x_mid), max(q_df$x_mid), length.out = 200))
+
+  q_grid$y_lo  <- predict(loess(y_lo  ~ x_mid, data = q_df, span = 0.6), newdata = q_grid)
+  q_grid$y_med <- predict(loess(y_med ~ x_mid, data = q_df, span = 0.6), newdata = q_grid)
+  q_grid$y_hi  <- predict(loess(y_hi  ~ x_mid, data = q_df, span = 0.6), newdata = q_grid)
+
+  q_grid <- q_grid %>%
+    mutate(
+      y_lo = pmax(y_lo, 0),
+      y_hi = pmin(y_hi, 100)
+    )
+
+  ggplot(d, aes(x = x, y = y)) +
+    geom_ribbon(
+      data = q_grid,
+      aes(x = x_mid, ymin = y_lo, ymax = y_hi),
+      inherit.aes = FALSE,
+      alpha = 0.18
+    ) +
+    geom_line(
+      data = q_grid,
+      aes(x = x_mid, y = y_med),
+      inherit.aes = FALSE,
+      linewidth = 1
+    ) +
+    geom_point(alpha = 0.35, size = 1.4) +
+    geom_abline(intercept = 0, slope = 1, linetype = 2) +
+    coord_equal(xlim = c(0, 100), ylim = c(0, 100)) +
+    annotate(
+      "text",
+      x = 0, y = 100,
+      label = ann_text,
+      hjust = 0, vjust = 1.1,
+      size = 4
+    ) +
+    labs(
+      title = panel_title("A.", "Model vs human mean"),
+      x = "Human mean severity (%)",
+      y = "Model severity (%)"
+    ) +
+    theme_pub()
+}
+
+make_panel_B <- function(df, model_col) {
+  d <- df %>%
+    mutate(
+      mean_pair = (human_mean + .data[[model_col]]) / 2,
+      diff = .data[[model_col]] - human_mean
+    )
+
+  md <- mean(d$diff, na.rm = TRUE)
+  sdv <- sd(d$diff, na.rm = TRUE)
+  loa_u <- md + 1.96 * sdv
+  loa_l <- md - 1.96 * sdv
+
+  # annotation string
+  ann <- paste0(
+    " Bias = ", sprintf("%.2f", md), "%\n",
+    "LoA = [", sprintf("%.2f", loa_l), ", ", sprintf("%.2f", loa_u), "]%"
+  )
+
+  ggplot(d, aes(x = mean_pair, y = diff)) +
+    geom_point(alpha = 0.35) +
+    geom_hline(yintercept = md) +
+    geom_hline(yintercept = loa_u, linetype = 2) +
+    geom_hline(yintercept = loa_l, linetype = 2) +
+    # Put the annotation in the top-left of the panel
+    annotate(
+      "text",
+      x = -Inf, y = Inf,
+      label = ann,
+      hjust = -0.15, vjust = 1.1,
+      size = 4
+    ) +
+    labs(
+      title = panel_title("B.", "Bland–Altman agreement"),
+      x = "Mean of model and human mean (%)",
+      y = "Model − human mean (%)"
+      ) +
+    theme_pub()
+}
+
+
+make_panel_C <- function(df, model_col, id_col, rater_cols,
+                         shorten_raters = TRUE,
+                         order_by = c("human", "delta"),
+                         ccc_xlim = c(0.80, 1.00)) {
+
+  order_by <- match.arg(order_by)
+
+  loo_tbl <- loo_consensus_ccc_one_model(df, {{id_col}}, rater_cols, model_col)
+
+  out_tbl <- loo_tbl %>%
+    select(withheld, comparison, ccc) %>%
+    pivot_wider(names_from = comparison, values_from = ccc) %>%
+    rename(
+      human_ccc = human_vs_consensus,
+      model_ccc = model_vs_consensus
+    ) %>%
+    mutate(
+      delta_ccc = model_ccc - human_ccc,
+      withheld_lab = if (shorten_raters) gsub("^Human_Rater", "R", withheld) else withheld
+    ) %>%
+    mutate(withheld_lab = {
+      ord <- if (order_by == "human") human_ccc else delta_ccc
+      reorder(withheld_lab, ord)
+    })
+
+  human_baseline <- mean(out_tbl$human_ccc, na.rm = TRUE)
+
+  # long format for colored endpoints
+  endpoints <- out_tbl %>%
+    select(withheld_lab, human_ccc, model_ccc) %>%
+    pivot_longer(cols = c(human_ccc, model_ccc),
+                 names_to = "endpoint", values_to = "ccc") %>%
+    mutate(endpoint = recode(endpoint,
+                             human_ccc = "Human (peer CCC)",
+                             model_ccc = "Model"))
+
+  ggplot(out_tbl, aes(y = withheld_lab)) +
+    geom_segment(aes(x = human_ccc, xend = model_ccc, yend = withheld_lab),
+                 linewidth = 0.9, color = "black", alpha = 0.7) +
+    geom_point(data = endpoints,
+               aes(x = ccc, color = endpoint),
+               size = 2.6) +
+    geom_vline(xintercept = human_baseline, linetype = 2) +
+    coord_cartesian(xlim = ccc_xlim) +
+    labs(
+      title = panel_title("C.", "LOO concordance vs consensus"),
+      #subtitle = paste0("Dashed = mean LOO human CCC (", sprintf("%.3f", human_baseline), ")"),
+      x = "CCC",
+      y = "Withheld rater"
+    ) +
+    theme_pub() +
+    theme(
+      legend.position = c(0.02, 0.98),     # inside, upper-left
+      legend.justification = c(0, 1),      # anchor legend's top-left corner
+      legend.background = element_rect(fill = scales::alpha("white", 0.8), color = NA),
+    legend.title = element_blank())
+}
+
+
+
+make_panel_D <- function(df, model_col, add_ref = FALSE, ref_y = 5) {
+  d <- df %>%
+    mutate(abs_err = abs(.data[[model_col]] - human_mean))
+
+  p <- ggplot(d, aes(x = human_sd, y = abs_err)) +
+    geom_point(alpha = 0.30) +
+    geom_rug(sides = "b", alpha = 0.15) +
+    geom_smooth(method = "gam", formula = y ~ s(x, k = 5), se = TRUE) +
+    labs(
+      title = panel_title("D.", "Model error tracks rater disagreement"),
+      x = "Human SD across raters",
+      y = "|Model − human mean| (%)"
+    ) +
+    theme_pub()
+
+  if (isTRUE(add_ref)) {
+    p <- p + geom_hline(yintercept = ref_y, linetype = 3, alpha = 0.6)
+  }
+
+  p
+}
+
+
+```
+
+
+```{r}
+library(quantreg)
+
+str(df_human_summary)
+
+best_model <- "Jan26_23-15-35_2026_sal0.5"
+rater_cols <- c("Human_Rater1","Human_Rater2","Human_Rater3","Human_Rater4","Human_Rater5")
+
+pC <- make_panel_C(df_human_summary, best_model, filename, rater_cols, order_by = "human")
+pB <- make_panel_B(df_human_summary, best_model)
+pD <- make_panel_D(df_human_summary, best_model)
+
+
+
+make_4panel_figure <- function(df, model_col, id_col, rater_cols,
+                               sev_xlim = c(0, 100),
+                               sev_ylim = c(0, 100),
+                               err_ylim = NULL,
+                               loo_order_by = c("human", "delta"),
+                               shorten_raters = TRUE,
+                               add_ref_err = FALSE,
+                               ref_err_y = 5) {
+
+  loo_order_by <- match.arg(loo_order_by)
+
+  # If you don’t pass err_ylim, compute it from data (robust-ish)
+  if (is.null(err_ylim)) {
+    err <- abs(df[[model_col]] - df$human_mean)
+    err_ylim <- c(0, max(err, na.rm = TRUE))
+  }
+
+  pA <- make_panel_A(df, model_col) +
+    coord_equal(xlim = sev_xlim, ylim = sev_ylim)
+
+  pB <- make_panel_B(df, model_col)   # uses annotated version you updated
+
+  pC <- make_panel_C(
+    df, model_col, {{id_col}}, rater_cols,
+    shorten_raters = shorten_raters,
+    order_by = loo_order_by
+  )
+
+  pD <- make_panel_D(df, model_col, add_ref = add_ref_err, ref_y = ref_err_y) +
+    coord_cartesian(ylim = err_ylim)
+
+top    <- pA | pB
+bottom <- pC | pD
+
+(top / bottom) +
+  patchwork::plot_layout(
+    widths  = c(1.5, 1),   # left col wider so A/C look balanced
+    heights = c(2, 1)    # top row taller
+  )
+
+}
+
+
+
+fig4 <- make_4panel_figure(
+  df = df_human_summary,
+  model_col = best_model,
+  id_col = filename,
+  rater_cols = rater_cols,
+  sev_xlim = c(0, 100),
+  sev_ylim = c(0, 100),
+  loo_order_by = "human",      # or "delta"
+  shorten_raters = TRUE,
+  add_ref_err = FALSE          # set TRUE if you want a horizontal error threshold line
+)
+
+fig4
+ggsave("FigureX_model_validation_4panel.png", fig4, width = 10, height = 8, dpi = 300)
+ggsave("FigureX_model_validation_4panel.pdf", fig4, width = 10, height = 8, device = cairo_pdf)
+
+
+```
+
+# -----------------------------
+
+# Repeat above, but for saliency methods 
+
+
+next chunk below are helper functions -- run once and then you dont have to run them again if you're in the same R session.
+
+```{r}
+
+# FULL PIPELINE WRAPPED INTO FUNCTIONS
+# - loops over saliency methods: Gradient_sr2, Gradient-SG_sr2, GradCAM_sr2, DeepLift_sr2
+# - runs: combine/clean -> wide -> averaged humans -> pairs plot PDFinstall.packages("xfun")
+
+# - runs: CV-vs-human correlations, ICC (humans + CV), variance components (lmer),
+#         CV agreement metrics vs human mean, CV vs each human,
+#         scatter plots + Bland–Altman plots,
+#         mixed model of human-on-CV (logit), error vs disagreement plots
+#
+# Assumes these objects already exist in your workspace:
+#   correlation_matrix_human_v_model
+#   concatenated_df_trimmed
+
+
+
+
+metric_vs_reference <- function(pred, ref) {
+  ok <- is.finite(pred) & is.finite(ref)
+  pred <- pred[ok]; ref <- ref[ok]
+
+  ccc <- tryCatch(DescTools::CCC(pred, ref)$rho.c[1], error = function(e) NA_real_)
+
+  tibble(
+    n    = length(ref),
+    CCC  = as.numeric(ccc),
+    cor  = as.numeric(cor(pred, ref)),
+    MAE  = mean(abs(pred - ref)),
+    RMSE = sqrt(mean((pred - ref)^2)),
+    bias = mean(pred - ref)
+  )
+}
+
+logit01 <- function(x, eps = 0.001) {
+  p <- pmin(pmax(x/100, eps), 1 - eps)
+  qlogis(p)
+}
+
+lower.panel <- function(x, y){
+  points(x, y, pch = 19)
+
+  r <- round(cor(x, y, use = "pairwise.complete.obs"), 2)
+  txt <- paste0("R = ", r)
+
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+
+  x0 <- 0.5
+  y0 <- 0.9
+  off <- 0.01
+  cex_txt <- 1.5
+  outline_col <- "black"
+
+  offsets <- matrix(c(
+    -off,  0,
+     off,  0,
+     0,   -off,
+     0,    off,
+    -off, -off,
+    -off,  off,
+     off, -off,
+     off,  off
+  ), ncol = 2, byrow = TRUE)
+
+  for(i in 1:nrow(offsets)){
+    text(x0 + offsets[i, 1], y0 + offsets[i, 2],
+         txt, col = outline_col, font = 2, cex = cex_txt)
+  }
+  text(x0, y0, txt, col = "#00E5FF", font = 2, cex = cex_txt)
+}
+
+plot_cv_scatter <- function(df_human_summary, cv_name) {
+  ggplot(df_human_summary, aes(x = human_mean, y = .data[[cv_name]])) +
+    geom_point(alpha = 0.6) +
+    geom_abline(intercept = 0, slope = 1) +
+    labs(
+      title = paste("CV vs Human Mean:", cv_name),
+      x = "Human mean severity (%)",
+      y = "CV severity (%)"
+    ) +
+    coord_equal()
+}
+
+plot_ba <- function(df_human_summary, cv_name) {
+  d <- df_human_summary %>%
+    transmute(
+      mean_xy = (human_mean + .data[[cv_name]])/2,
+      diff_xy = .data[[cv_name]] - human_mean
+    ) %>%
+    drop_na()
+
+  bias <- mean(d$diff_xy)
+  loa  <- bias + c(-1, 1) * 1.96 * sd(d$diff_xy)
+
+  ggplot(d, aes(mean_xy, diff_xy)) +
+    geom_point(alpha = 0.6) +
+    geom_hline(yintercept = bias) +
+    geom_hline(yintercept = loa[1], linetype = 2) +
+    geom_hline(yintercept = loa[2], linetype = 2) +
+    labs(
+      title = paste("Bland–Altman:", cv_name),
+      x = "Mean of (Expert Mean, Model) (%)",
+      y = "Model − Expert Mean (%)"
+    )
+}
+
+cv_error_vs_disagreement <- function(df_human_summary, cv_name) {
+  df_human_summary %>%
+    mutate(abs_err = abs(.data[[cv_name]] - human_mean)) %>%
+    ggplot(aes(x = human_sd, y = abs_err)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "lm", se = TRUE) +
+    labs(
+      title = paste("Absolute Model Error vs Expert Disagreement:", cv_name),
+      x = "SD Across Experts",
+      y = "|Model − Expert Mean|"
+    )
+}
+
+
+fit_human_on_cv <- function(df, human_cols, cv_name) {
+  d <- df %>%
+    select(filename, all_of(human_cols), all_of(cv_name)) %>%
+    pivot_longer(all_of(human_cols), names_to = "rater", values_to = "human_score") %>%
+    mutate(cv_score = .data[[cv_name]]) %>%
+    drop_na(human_score, cv_score) %>%
+    mutate(
+      y = logit01(human_score),
+      x = logit01(cv_score)
+    )
+  print("################## fit human on cv function ####################")
+  print("")
+
+  lmer(y ~ x + (1|filename) + (1|rater), data = d, REML = TRUE)
+}
+```
+
+## You may have to edit model prefixes in chunk below... otherwise dont edit it... it's painful 
+
+There are two edits that needs to be made to make sure you catch the model identifier:
+*`stringr::str_detect(identifier, "^(Jan22_|Jan26_|Jan29_)")`
+*`  keep_prefix = c(`
+
+Eventually I'll make this more robust, but this works for now. 
+
+```{r}
+
+inv_logit01 <- function(z) 100 * plogis(z)
+
+
+make_human_vs_model <- function(
+  correlation_matrix_human_v_model,
+  concatenated_df_trimmed,
+  saliency_col,
+  keep_humans = c("MW","DG","NW","TB","BR","CC"),
+  keep_prefix = c("Jan22_10-21-00_2026_up0.95_dwn0.3_infg0.3_spth0.7","Jan26_23-15-35_2026_up0.95_dwn0.2_infg0.3_spth0.5","Jan29_22-02-46_2026_up0.55__dwn0.15_infg0.3_spth0.65"),
+  drop_models_regex = "^(Feb01_|Aug31_|Feb03_04)|May11_00-29-56_2021",
+  out_prefix = "human_vs_model",
+  out_dir = "."
+) {
+
+  # 1) bind + force consistent types
+  combined <- dplyr::bind_rows(
+    correlation_matrix_human_v_model %>% dplyr::mutate(dplyr::across(dplyr::everything(), as.character)),
+    concatenated_df_trimmed         %>% dplyr::mutate(dplyr::across(dplyr::everything(), as.character))
+  )
+
+  # 2) resolve analysis column robustly
+
+  # scalar / non-saliency metrics that should NEVER get _sr2
+  scalar_metrics <- c(
+    "severity_rate_patch",
+    "severity_patch_rate"
+  )
+  
+  if (saliency_col %in% names(combined)) {
+    # exact match always wins
+    sal_col <- saliency_col
+  
+  } else if (saliency_col %in% scalar_metrics) {
+    stop(
+      "Scalar metric '", saliency_col,
+      "' not found in combined data.\nAvailable columns:\n",
+      paste(names(combined), collapse = ", ")
+    )
+  
+  } else {
+    # saliency-style fallback
+    candidates <- c(
+      saliency_col,
+      paste0(saliency_col, "_sr2")
+    )
+    sal_col <- candidates[candidates %in% names(combined)][1]
+  }
+  
+  if (is.na(sal_col)) {
+    stop(
+      "No matching analysis column found.\n",
+      "Tried: ", paste(candidates, collapse = ", "), "\n",
+      "Available columns:\n",
+      paste(names(combined), collapse = ", ")
+    )
+  }
+  
+  cat("Starting with:", sal_col, "\n")
+
+
+
+  # 3) human override: copy severity_rate_patch into the selected saliency column for human rows
+  combined <- combined %>%
+    dplyr::mutate(
+      "{sal_col}" := dplyr::if_else(model_type == "human", severity_rate_patch, .data[[sal_col]])
+    ) %>%
+    dplyr::select(-severity_rate_patch)
+
+  # 4) keep relevant cols + non-missing
+  df0 <- combined %>%
+    dplyr::select(filename, identifier, model_type, tray, classes, up_th, down_th, spor_th, inf_gate, dplyr::all_of(sal_col)) %>%
+    dplyr::mutate(
+      # turn "-", "", "NA" into NA then parse
+      "{sal_col}" := readr::parse_number(dplyr::na_if(as.character(.data[[sal_col]]), "-")),
+      "{sal_col}" := dplyr::na_if(.data[[sal_col]], NaN)
+    ) %>%
+    dplyr::filter(is.finite(.data[[sal_col]]))
+
+  # 5) filename suffix logic
+  df0 <- df0 %>%
+    dplyr::mutate(filename = dplyr::case_when(
+      grepl("5dpi", filename)  ~ filename,
+      grepl("10dpi", filename) ~ filename,
+      TRUE ~ paste0(filename, "_", tray)
+    ))
+
+  # 6) append threshold values into identifier if numeric (keeps separation by thresholds)
+  df1 <- df0 %>%
+    dplyr::mutate(identifier_base = identifier) %>%
+    dplyr::mutate(
+      up_th_num = suppressWarnings(as.numeric(up_th)),
+      identifier = dplyr::if_else(
+        !is.na(up_th_num) & !stringr::str_detect(identifier, "_up[0-9]"),
+        paste0(identifier, "_up", up_th),
+        identifier
+      ),
+  
+      down_th_num = suppressWarnings(as.numeric(down_th)),
+      identifier  = dplyr::if_else(
+        !is.na(down_th_num) & !stringr::str_detect(identifier, "_dwn[0-9]"),
+        paste0(identifier, "_dwn", down_th),
+        identifier
+      ),
+  
+      inf_gate_num = suppressWarnings(as.numeric(inf_gate)),
+      identifier   = dplyr::if_else(
+        !is.na(inf_gate_num) & !stringr::str_detect(identifier, "_infg[0-9]"),
+        paste0(identifier, "_infg", inf_gate),
+        identifier
+      ),
+  
+      spor_th_num = suppressWarnings(as.numeric(spor_th)),
+      identifier  = dplyr::if_else(
+        !is.na(spor_th_num) & !stringr::str_detect(identifier, "_spth[0-9]"),
+        paste0(identifier, "_spth", spor_th),
+        identifier
+      )
+    ) %>%
+    dplyr::select(-up_th_num, -down_th_num, -inf_gate_num, -spor_th_num)
+
+  # 7) filter identifiers robustly:
+  # - keep exact humans
+  # - keep anything starting with Jan22 or Jan26 (so threshold-appended variants are kept)
+    df2 <- tryCatch(
+    {
+      tmp <- df1 %>%
+        dplyr::select(filename, identifier, model_type, classes, dplyr::all_of(sal_col)) %>%
+        dplyr::filter(
+          identifier %in% keep_humans |
+            stringr::str_detect(identifier, "^(Jan22_|Jan26_|Jan29_)")
+        ) %>%
+        dplyr::mutate(
+          "{sal_col}" := readr::parse_number(dplyr::na_if(as.character(.data[[sal_col]]), "-"))
+        )
+        tmp
+    },
+    error = function(e) {
+      message("❌ df2 creation failed for ", sal_col, ": ", conditionMessage(e))
+  
+      message("Columns in df1: ", paste(names(df1), collapse = ", "))
+      message("sal_col = ", sal_col)
+      if (!("identifier" %in% names(df1))) message("MISSING: identifier")
+      if (!("model_type" %in% names(df1))) message("MISSING: model_type")
+      if (!(sal_col %in% names(df1))) message("MISSING: ", sal_col)
+  
+      NULL
+    }
+  )
+  
+  if (is.null(df2)) stop("Stopping because df2 failed (see error above).")
+
+  # 8) wide pivot
+  data_wide <- data.table::dcast(
+    data.table::as.data.table(df2),
+    filename ~ identifier + model_type,
+    value.var = sal_col,
+    fun.aggregate = mean,
+    na.rm = TRUE
+  )
+  
+  min_n <- 50
+  keep_cols <- names(data_wide)[
+  c(TRUE, colSums(!is.na(data_wide[, -1, with = FALSE])) >= min_n)]
+  data_wide_pruned <- data_wide[, ..keep_cols]
+  
+  # remove any remaining rows with missing data
+  data_wide <- data_wide_pruned %>%
+    tidyr::drop_na()
+
+  # 9) save grid
+  sal_tag <- tolower(gsub("_sr2$", "", sal_col))
+  out_grid <- file.path(out_dir, sprintf("%s_wide_data_grid_%s.csv", out_prefix, sal_tag))
+  utils::write.csv2(data_wide, out_grid)
+
+  # 10) drop old models + reorder
+  data_wide_na_rm <- tibble::as_tibble(data_wide) %>%
+    dplyr::select(-dplyr::matches(drop_models_regex))
+
+  data_wide_na_rm_reordered <- data_wide_na_rm %>%
+    dplyr::select(
+      -dplyr::ends_with("_computer_vision"),
+      -dplyr::ends_with("_human"),
+      dplyr::ends_with("_computer_vision"),
+      dplyr::ends_with("_human")
+    ) %>%
+    dplyr::select(-dplyr::matches("DG_human"))
+
+  out_wide <- file.path(out_dir, sprintf("%s_wide_data_%s.csv", out_prefix, sal_tag))
+  utils::write.csv(data_wide_na_rm_reordered, out_wide, row.names = FALSE)
+
+  # 11) average humans
+  humans_averaged <- data_wide_na_rm_reordered %>%
+    dplyr::mutate(
+      mean_human_severity   = rowMeans(dplyr::select(., dplyr::matches("_human")), na.rm = TRUE),
+      median_human_severity = apply(dplyr::select(., dplyr::matches("_human")), 1, median, na.rm = TRUE),
+      sd_human_severity     = apply(dplyr::select(., dplyr::matches("_human")), 1, sd, na.rm = TRUE),
+      n_humans              = rowSums(!is.na(dplyr::select(., dplyr::matches("_human"))))
+    ) %>%
+    tidyr::drop_na()
+
+  list(
+    saliency_col    = sal_col,
+    sal_tag         = sal_tag,
+    long_df         = df2,
+    wide_grid       = data_wide,
+    wide_clean      = data_wide_na_rm_reordered,
+    humans_averaged = humans_averaged,
+    out_grid_csv    = out_grid,
+    out_wide_csv    = out_wide
+  )
+}
+
+```
+
+##### Do not touch the function below, it was painful to make.  ##### 
+
+```{r}
+# -----------------------------
+# 2) Run “rest of code chunks” on averaged table
+# -----------------------------
+analyze_human_vs_model <- function(humans_averaged, out_dir = ".", sal_tag = "saliency") {
+  df_plot <- humans_averaged %>%
+    dplyr::select(-dplyr::any_of(c("n_humans", "sd_human_severity")))
+  
+  # --- robust numeric selection for pairs() ---
+  num_df <- df_plot %>%
+    dplyr::select(-dplyr::any_of("filename")) %>%
+    dplyr::mutate(dplyr::across(dplyr::everything(), ~ suppressWarnings(as.numeric(.x)))) %>%
+    dplyr::select(dplyr::where(is.numeric))
+
+  pdf_path <- file.path(out_dir, sprintf("pairs_plot_human_vs_model_%s.pdf", sal_tag))
+
+  if (ncol(num_df) < 2) {
+    warning("Not enough numeric columns for pairs plot; skipping: ", pdf_path)
+  } else {
+    # --- robust PDF device: try cairo_pdf, else base pdf ---
+    opened <- FALSE
+    try({
+      if ("cairo_pdf" %in% getNamespaceExports("grDevices")) {
+        grDevices::cairo_pdf(pdf_path, width = 12, height = 12)  # no family arg here
+      } else {
+        grDevices::pdf(pdf_path, width = 12, height = 12, family = "sans")
+      }
+      opened <- TRUE
+
+      pairs(
+        num_df,
+        upper.panel = NULL,
+        lower.panel = lower.panel
+      )
+    }, silent = TRUE)
+
+    if (opened) grDevices::dev.off()
+  }
+  
+  df_dat <- humans_averaged %>%
+  dplyr::select(filename, dplyr::everything())
+
+
+  human_cols <- names(df_dat) %>% stringr::str_subset("^Human_Rater\\d+$")
+  if (length(human_cols) == 0) human_cols <- names(df_dat) %>% stringr::str_subset("_human$")
+  
+  if (length(human_cols) == 0) {
+    stop("No human rater columns found. Columns: ", paste(names(df_dat), collapse = ", "))
+  }
+  
+  # Ensure Mean_Human_Rating exists
+  if (!("Mean_Human_Rating" %in% names(df_dat))) {
+    df_dat <- df_dat %>%
+      dplyr::mutate(
+        Mean_Human_Rating = rowMeans(dplyr::across(dplyr::all_of(human_cols)), na.rm = TRUE)
+      )
+  }
+  
+ 
+  # CV candidates by name (not by type)
+  cv_candidates <- setdiff(
+    names(df_dat),
+    c("filename", human_cols, "Mean_Human_Rating", "Median_Human_Rating", "sd_human_severity", "n_humans")
+  )
+  
+  # Coerce CV candidates safely to numeric
+  df_dat <- df_dat %>%
+    dplyr::mutate(dplyr::across(dplyr::all_of(cv_candidates), ~ suppressWarnings(as.numeric(.x))))
+  
+  cv_cols <- df_dat %>%
+    select(-all_of(human_cols), -filename) %>%
+    select(where(is.numeric)) %>%
+    names() %>%
+    .[. != "median_human_severity" & . != "mean_human_severity" & . != "sd_human_severity" & . != "n_humans" & . != "Mean_Human_Rating"  & . != "Median_Human_Rating"]  
+
+  # CV correlations vs Mean_Human_Rating (robust)
+  cv_correlations <- tibble(model = cv_cols) %>%
+    mutate(
+      correlation = purrr::map_dbl(model, function(col) {
+        x <- suppressWarnings(as.numeric(df_dat[[col]]))
+        y <- suppressWarnings(as.numeric(df_dat$Mean_Human_Rating))
+  
+        ok <- is.finite(x) & is.finite(y)
+        if (sum(ok) < 3) return(NA_real_)           # not enough pairs
+        if (sd(x[ok]) == 0 || sd(y[ok]) == 0) return(NA_real_)  # constant vector
+  
+        cor(x[ok], y[ok])
+      })
+    ) %>%
+    arrange(desc(abs(correlation)))
+  
+  cat("n human cols:", length(human_cols), "\n")
+  print(human_cols)
+ #cat("#######################################################################","\n")
+
+  cat("n cv cols:", length(cv_cols), "\n")
+  print(cv_cols)
+
+  
+  cat("########################  Performing ICC  ##############################", "\n")
+  
+  # ICC humans
+  icc_out_human <- if (length(human_cols) >= 2) psych::ICC(df_dat %>% select(all_of(human_cols))) else NA
+  icc_out_cv    <- if (length(cv_cols)   >= 2) psych::ICC(df_dat %>% select(all_of(cv_cols)))   else NA
+  
+  cat("[", sal_tag, "] ICC results:\n")
+  print(icc_out_human)
+
+  # variance components: humans
+  df <- humans_averaged %>% dplyr::select(filename, dplyr::everything())
+  
+  # Human columns: prefer Human_Rater*, else fall back to *_human
+  human_cols <- names(df) %>% stringr::str_subset("^Human_Rater\\d+$")
+  if (length(human_cols) == 0) {
+    human_cols <- names(df) %>% stringr::str_subset("_human$")
+  }
+  
+  # Fail fast with a clear message (instead of pivot_longer cryptic error)
+  if (length(human_cols) == 0) {
+    stop(
+      "No human rater columns found in humans_averaged.\n",
+      "Expected columns like Human_Rater1.. or *_human.\n",
+      "Columns present: ", paste(names(df), collapse = ", ")
+    )
+  }
+  
+  # If Mean_Human_Rating doesn't exist (renaming didn’t happen), compute it now
+  if (!("Mean_Human_Rating" %in% names(df))) {
+    df <- df %>%
+      dplyr::mutate(Mean_Human_Rating = rowMeans(dplyr::across(dplyr::all_of(human_cols)), na.rm = TRUE))
+  }
+  
+  # Now pivot safely
+  df_long_humans <- df %>%
+    tidyr::pivot_longer(
+      cols = dplyr::all_of(human_cols),
+      names_to = "rater",
+      values_to = "human_score"
+    )
+  
+  cat("\n")
+  cat("#######################  Fitting linear model  #########################", "\n")
+
+
+  m_human_vc <- lmer(human_score ~ 1 + (1|filename) + (1|rater), data = df_long_humans, REML = TRUE)
+  vc <- as.data.frame(VarCorr(m_human_vc))
+  var_image <- vc %>% filter(grp == "filename") %>% pull(vcov)
+  var_rater <- vc %>% filter(grp == "rater")    %>% pull(vcov)
+  var_resid <- attr(VarCorr(m_human_vc), "sc")^2
+  total_var <- var_image + var_rater + var_resid
+
+  vc_tbl <- tibble(
+    component = c("image", "rater", "residual"),
+    variance  = c(var_image, var_rater, var_resid),
+    pct       = 100 * variance / total_var
+  )
+  
+  cat("[", sal_tag, "] attributable variance:\n")
+  print(vc_tbl)
+
+  #print(df)
+  #class(df)
+  #is.function(df)
+  
+  # CV vs mean human metrics
+  df_human_summary <- df %>%
+    mutate(
+      human_mean = rowMeans(across(all_of(human_cols)), na.rm = TRUE),
+      human_sd   = apply(select(., all_of(human_cols)), 1, sd, na.rm = TRUE)
+    )
+
+  cv_vs_mean_tbl <- map_dfr(cv_cols, \(cv) {
+    out <- metric_vs_reference(df_human_summary[[cv]], df_human_summary$human_mean)
+    out$model <- cv
+    out
+  }) %>% relocate(model)
+
+    cat("################  Human vs saliency method concordance  ###############", "\n")
+
+  # CV vs each human
+  cv_vs_each_human <- expand_grid(model = cv_cols, rater = human_cols) %>%
+    mutate(metrics = map2(model, rater, \(m, r) {
+      metric_vs_reference(df[[m]], df[[r]])
+    })) %>%
+    unnest(metrics) #%>%
+    #mutate(
+    #  CCC  = map_dbl(CCC,  ~ .x[1]),
+    #  cor  = map_dbl(cor,  ~ .x[1]),
+    #  MAE  = map_dbl(MAE,  ~ .x[1]),
+    #  RMSE = map_dbl(RMSE, ~ .x[1]),
+    #  bias = map_dbl(bias, ~ .x[1])
+    #)
+
+  cv_vs_each_human_summary <- cv_vs_each_human %>%
+    dplyr::filter(!rater %in% c("Mean_Human_Rating", "Median_Human_Rating")) %>%
+    group_by(model) %>%
+    summarize(
+      CCC_mean  = mean(CCC,  na.rm = TRUE),
+      CCC_sd    = sd(CCC,    na.rm = TRUE),
+      MAE_mean  = mean(MAE,  na.rm = TRUE),
+      RMSE_mean = mean(RMSE, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  
+  cat("[", sal_tag, "] Concordance summaries:\n")
+
+  print(cv_vs_each_human_summary)
+  
+  
+
+  # Plots: scatter and BA
+  scatter_plot <- wrap_plots(lapply(cv_cols, \(nm) plot_cv_scatter(df_human_summary, nm)))
+  ba_plot      <- wrap_plots(lapply(cv_cols, \(nm) plot_ba(df_human_summary, nm)))
+  err_plot     <- wrap_plots(lapply(cv_cols, \(nm) cv_error_vs_disagreement(df_human_summary, nm)))
+
+  # Mixed models: human-on-CV (logit)
+  models_human_on_cv <- setNames(lapply(cv_cols, \(cv) {
+    tryCatch(fit_human_on_cv(df, human_cols, cv), error = function(e) NULL)
+  }), cv_cols)
+  
+  model_summaries <- lapply(models_human_on_cv, function(m) if (is.null(m)) NULL else summary(m))
+
+  
+  cat("#########################  Writing files  #############################", "\n")
+  cat("[", sal_tag, "] output files saved to:", out_dir, "\n")
+
+  
+  # Save key tables to disk (optional)
+  write.csv(cv_correlations, file.path(out_dir, sprintf("cv_correlations_%s.csv", sal_tag)), row.names = FALSE)
+  write.csv(cv_vs_mean_tbl,  file.path(out_dir, sprintf("cv_vs_mean_tbl_%s.csv", sal_tag)), row.names = FALSE)
+  write.csv(cv_vs_each_human_summary, file.path(out_dir, sprintf("cv_vs_each_human_summary_%s.csv", sal_tag)), row.names = FALSE)
+  write.csv(vc_tbl, file.path(out_dir, sprintf("human_variance_components_%s.csv", sal_tag)), row.names = FALSE)
+
+  list(
+    pdf_pairs = pdf_path,
+    human_cols = human_cols,
+    cv_cols = cv_cols,
+    cv_correlations = cv_correlations,
+    icc_humans = icc_out_human,
+    icc_cv = icc_out_cv,
+    human_vc_model = m_human_vc,
+    human_vc_tbl = vc_tbl,
+    cv_vs_mean_tbl = cv_vs_mean_tbl,
+    cv_vs_each_human = cv_vs_each_human,
+    cv_vs_each_human_summary = cv_vs_each_human_summary,
+    scatter_plot = scatter_plot,
+    ba_plot = ba_plot,
+    error_vs_disagreement_plot = err_plot,
+    human_on_cv_models = models_human_on_cv,
+    human_on_cv_summaries = model_summaries
+  )
+}
+```
+
+## Run the functions above by editing chunk below
+
+```{r}
+# 3) Run everything for all saliency methods
+# -----------------------------
+saliency_cols <- c("Gradient-SG_sr2", "GradCAM_sr2", "DeepLift_sr2")
+
+# optional: where to save outputs
+out_dir <- "../figs_for_pub"
+
+results <- setNames(lapply(saliency_cols, function(col) {
+  prep <- make_human_vs_model(
+    correlation_matrix_human_v_model,
+    concatenated_df_trimmed,
+    saliency_col = col,
+    out_dir = out_dir
+  )
+
+  analysis <- analyze_human_vs_model(
+    prep$humans_averaged,
+    out_dir = out_dir,
+    sal_tag = col
+  )
+
+  list(prep = prep, analysis = analysis)
+}), saliency_cols)
+
+# -----------------------------
+# 4) Example: look at correlations for each method
+# -----------------------------
+results[["GradCAM_sr2"]]$analysis$cv_correlations %>% slice(1:20)
+results[["Gradient-SG_sr2"]]$analysis$cv_correlations %>% slice(1:20)
+
+
+# Example: view plots for one method in RStudio
+results[["GradCAM_sr2"]]$analysis$scatter_plot
+results[["GradCAM_sr2"]]$analysis$error_vs_disagreement_plot
+results[["Gradient-SG_sr2"]]$analysis$scatter_plot
+results[["Gradient-SG_sr2"]]$analysis$error_vs_disagreement_plot
+results[["DeepLift_sr2"]]$analysis$scatter_plot
+results[["DeepLift_sr2"]]$analysis$error_vs_disagreement_plot
+
+
+# Example: inspect ICC outputs
+results[["GradCAM_sr2"]]$analysis$icc_humans
+results[["Gradient-SG_sr2"]]$analysis$icc_humans
+results[["DeepLift_sr2"]]$analysis$icc_humans
+
+
+# Example: summaries of mixed models (human-on-CV) for one method
+results[["GradCAM_sr2"]]$analysis$human_on_cv_summaries
+results[["Gradient-SG_sr2"]]$analysis$human_on_cv_summaries
+results[["DeepLift_sr2"]]$analysis$human_on_cv_summaries
+
+
+results[["GradCAM_sr2"]]$analysis$cv_vs_each_human_summary
+results[["Gradient-SG_sr2"]]$analysis$cv_vs_each_human_summary
+results[["DeepLift_sr2"]]$analysis$cv_vs_each_human_summary
+
+
+
+```
+# ------------------------------
+
+
+# What about human estimates of sporulation? 
+
+```{r}
+
+# select only the relevant columns
+sporulation_select <- combined %>%
+        dplyr::select(filename, identifier, model_type, tray, classes, up_th, down_th, spor_th, inf_gate, sal_threshold, percent_conidiophores, percent_hyphae) %>%
+        dplyr::filter(!is.na(percent_conidiophores)) %>%
+        dplyr::filter(tray == "10dpi")
+
+
+# if the filename doesnt end in "5dpi" or "10dpi", then append this information to the filename from the tray column
+sporulation_select <- sporulation_select %>%
+  dplyr::mutate(filename = dplyr::case_when(
+    grepl("10dpi", filename) ~ filename,
+    TRUE ~ paste0(filename, "_", tray)
+  ))
+
+sporulation_select2 <- sporulation_select %>%
+  dplyr::mutate(
+    up_th_num = suppressWarnings(as.numeric(up_th)),
+    identifier = dplyr::if_else(
+      !is.na(up_th_num),                      # only if it's numeric
+      paste0(identifier, "_up", up_th),         # append original value
+      identifier                              # otherwise leave unchanged
+    )
+  ) %>%
+  dplyr::mutate(
+    down_th_num = suppressWarnings(as.numeric(down_th)),
+    identifier = dplyr::if_else(
+      !is.na(down_th_num),                      # only if it's numeric
+      paste0(identifier, "_dwn", down_th),         # append original value
+      identifier                              # otherwise leave unchanged
+      )) %>%
+    dplyr::mutate(
+    inf_gate_num = suppressWarnings(as.numeric(inf_gate)),
+    identifier = dplyr::if_else(
+      !is.na(inf_gate_num),                      # only if it's numeric
+      paste0(identifier, "_infg", inf_gate),         # append original value
+      identifier                              # otherwise leave unchanged
+      )) %>%
+    dplyr::mutate(
+      spor_th_num = suppressWarnings(as.numeric(spor_th)),
+      identifier = dplyr::if_else(
+      !is.na(spor_th_num),                      # only if it's numeric
+      paste0(identifier, "_spth", spor_th),         # append original value
+      identifier                              # otherwise leave unchanged
+      )) %>%
+    dplyr::mutate(
+      sal_th_num = suppressWarnings(as.numeric(sal_threshold)),
+      identifier = dplyr::if_else(
+        !is.na(sal_th_num),                      # only if it's numeric
+        paste0(identifier, "_salth", sal_threshold),         # append original value
+        identifier                             # otherwise leave unchanged
+        )) %>%
+dplyr::select(c(-up_th_num, -down_th_num, -inf_gate_num, -spor_th_num, -sal_th_num))
+
+unique(sporulation_select2$identifier)
+
+
+sporulation_select2 <- sporulation_select2 %>%
+  dplyr::select(filename, identifier, model_type, classes, percent_conidiophores, percent_hyphae)
+
+write.csv(sporulation_select2, "human_vs_model_long_sporulation_data.csv")
+
+
+sporulation_select3 <- sporulation_select2 %>%
+  dplyr::filter(identifier %in% c("MW",
+                                 "DG",
+                                 "NW",
+                                 "TB",
+                                 "BR",
+                                 "CC",
+                                 "DG",
+                                 "Jan22_10-21-00_2026_up0.95_dwn0.3_infg0.3_spth0.5_salth0.5",
+                                 "Jan22_10-21-00_2026_up0.95_dwn0.3_infg0.3_spth0.7_salth0.7",
+                                 "Jan26_23-15-35_2026_up0.95_dwn0.3_infg0.3_spth0.5_salth0.5",
+                                 "Jan26_23-15-35_2026_up0.95_dwn0.2_infg0.3_spth0.5_salth0.7",
+                                 "Feb03_16-24-20_2024_up0.8_dwn0.3_salth0.7",
+                                 "Feb14_15-53-04_2024_up0.8_dwn0.3_salth0.7",
+                                 "Jan29_22-02-46_2026_up0.55_dwn0.15_infg0.3_spth0.65_salth0.5"
+                                 ))
+
+unique(sporulation_select2$identifier)
+
+library(data.table)
+
+tmp <- sporulation_select3 %>%
+  mutate(
+    percent_conidiophores = readr::parse_number(
+      na_if(as.character(percent_conidiophores), "-")
+    )
+  ) %>%
+    mutate(
+    percent_hyphae = readr::parse_number(
+      na_if(as.character(percent_hyphae), "-")
+    )
+  )
+
+#dt <- as.data.table(tmp)
+
+#dt_nodups <- dt[, if (.N == 1) .SD, by = .(filename, identifier, model_type)]
+
+
+# pivot the table
+data_spore_wide <- dcast(
+  as.data.table(tmp),
+  filename ~ identifier + model_type,
+  value.var = "percent_conidiophores",
+  fun.aggregate = mean,
+  na.rm = TRUE
+)
+
+data_hyphae_wide <- dcast(
+  as.data.table(tmp),
+  filename ~ identifier + model_type,
+  value.var = "percent_hyphae",
+  fun.aggregate = mean,
+  na.rm = TRUE
+)
+
+##data_wide <- dcast(
+#  dt_nodups,
+#  filename ~ identifier + model_type,
+#  value.var = "severity_rate_patch"
+#)
+
+write.csv2(data_spore_wide, "human_vs_model_wide_data_sporulation_10dpi.csv")
+
+# drop columns that start with Feb01_ or Aug31_ *these are old model versions that we dont want to include in the analysis*
+data_wide_spore_na_rm <- data_spore_wide %>%
+  dplyr::select(-dplyr::matches("^(Feb01_|Aug31_|Feb03)")) %>%
+  dplyr::select(-dplyr::matches("May11_00-29-56_2021")) %>% # remove this specific column 
+  dplyr::filter(!is.na(TB_human))
+
+
+data_wide_na_rm_spore_reordered <- data_wide_spore_na_rm %>%
+  dplyr::select(
+    -dplyr::ends_with("_computer_vision"),
+    -dplyr::ends_with("_human"),
+    dplyr::ends_with("_computer_vision"),
+    dplyr::ends_with("_human")
+  )
+
+
+write.csv(data_wide_na_rm_spore_reordered, "human_vs_model_wide_spore.csv")
+
+
+# drop Dave since he didnt recieve great instructions
+data_wide_na_rm_spore_reordered <- data_wide_na_rm_spore_reordered %>%
+  dplyr::select(-dplyr::matches("DG_human"))
+  
+
+# Average out the human ratings
+data_wide_na_rm_reordered_humans_spore_averaged <- data_wide_na_rm_spore_reordered %>%
+  dplyr::mutate(
+    mean_human_severity   = rowMeans(dplyr::select(., dplyr::matches("_human")), na.rm = TRUE),
+    median_human_severity = apply(dplyr::select(., dplyr::matches("_human")), 1, median, na.rm = TRUE),
+    sd_human_severity     = apply(dplyr::select(., dplyr::matches("_human")), 1, sd, na.rm = TRUE),
+    n_humans              = rowSums(!is.na(dplyr::select(., dplyr::matches("_human"))))
+  ) %>%
+  # remove any NaN
+  drop_na()
+
+# rename BR_Human to Human_Rater1; CC_Human to Human_Rater2; MW_Human to Human_Rater3; NW_Human to Human_Rater4; TB_Human to Human_Rater5
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("BR_human", "Human_Rater1", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("CC_human", "Human_Rater2", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("MW_human", "Human_Rater3", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("NW_human", "Human_Rater4", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("TB_human", "Human_Rater5", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("mean_human_severity", "Mean_Human_Rating", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("median_human_severity", "Median_Human_Rating", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("Jan22_10-21-00_2026_up0.95_dwn0.3_infg0.3_spth0.7_salth0.7_computer_vision", "Jan22_10-21-00_2026_sal0.7", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("Jan26_23-15-35_2026_up0.95_dwn0.2_infg0.3_spth0.5_salth0.7_computer_vision", "Jan26_23-15-35_2026_sal0.7", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("Jan26_23-15-35_2026_up0.95_dwn0.3_infg0.3_spth0.5_salth0.5_computer_vision", "Jan26_23-15-35_2026_sal0.5", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("Jan22_10-21-00_2026_up0.95_dwn0.3_infg0.3_spth0.5_salth0.5_computer_vision", "Jan22_10-21-00_2026_sal0.5", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+colnames(data_wide_na_rm_reordered_humans_spore_averaged) <- gsub("Jan29_22-02-46_2026_up0.55_dwn0.15_infg0.3_spth0.65_salth0.5", "Jan29_22-02-46_2026_sal0.5", colnames(data_wide_na_rm_reordered_humans_spore_averaged))
+
+
+```
+
+# Sporulation condordance and correlation
+
+```{r}
+
+
+lower.panel <- function(x, y){
+  points(x, y, pch = 19)
+
+  r <- round(cor(x, y), 2)
+  txt <- paste0("R = ", r)
+
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+
+  x0 <- 0.5
+  y0 <- 0.9
+  off <- 0.01     # outline thickness
+  cex_txt <- 1.5   # text size
+  outline_col <- "black"
+
+  # 8-direction outline offsets
+  offsets <- matrix(c(
+    -off,  0,
+     off,  0,
+     0,   -off,
+     0,    off,
+    -off, -off,
+    -off,  off,
+     off, -off,
+     off,  off
+  ), ncol = 2, byrow = TRUE)
+
+  # draw outline
+  for(i in 1:nrow(offsets)){
+    text(x0 + offsets[i, 1], y0 + offsets[i, 2],
+         txt, col = outline_col, font = 2, cex = cex_txt)
+  }
+
+  # draw main text on top
+  text(x0, y0, txt, col = "#00E5FF", font = 2, cex = cex_txt)
+}
+
+
+df_plot <- data_wide_na_rm_reordered_humans_spore_averaged %>%
+  select(-n_humans, -sd_human_severity)   # keep filename, drop stats you don't want
+
+library(Cairo)
+
+CairoPDF("../figs_for_pub/correlation_plots/pairs_plot_human_vs_model_grid_sporulation.pdf",
+         width = 12, height = 12,
+         family = "Arial")
+
+pairs(
+  df_plot %>% select(-filename) %>% select(where(is.numeric)),
+  upper.panel = NULL,
+  lower.panel = lower.panel
+)
+
+dev.off()
+
+# 1) Get only the computer vision columns
+cv_cols <- names(data_wide_na_rm_reordered_humans_spore_averaged) %>%
+  .[grepl("_202", .)]
+
+cv_cols
+
+# 2) Compute correlation vs mean_human_severity for each CV model
+cv_correlations <- tibble(model = cv_cols) %>%
+  mutate(
+    correlation = sapply(model, function(col) {
+      cor(
+        data_wide_na_rm_reordered_humans_spore_averaged[[col]],
+        data_wide_na_rm_reordered_humans_spore_averaged$Mean_Human_Rating,
+        use = "pairwise.complete.obs"
+      )
+    })
+  ) %>%
+  arrange(desc(abs(correlation)))  # sort by strongest correlation (positive or negative)
+
+# 3) Print top 5
+cv_correlations %>% slice(1:50)
+
+
+
+#### Human inter-rater reliability (ICC) ######
+df_spore <- data_wide_na_rm_reordered_humans_spore_averaged %>%
+  select(filename, starts_with("Human_Rater"), everything())
+
+
+human_cols_spore <- names(df_spore) %>% str_subset("^Human_Rater\\d+$")
+
+# If your 3 CV models are exactly those date columns, grab all non-human numeric columns except filename:
+cv_cols_spore <- df_spore %>%
+  select(-all_of(human_cols_spore), -filename) %>%
+  select(where(is.numeric)) %>%
+  names() %>%
+  .[. != "Mean_Human_Rating" & . != "Median_Human_Rating" & . != "sd_human_severity" & . != "n_humans"]
+
+human_cols_spore
+cv_cols_spore
+
+
+# Calculate ICC for human raters
+human_mat_spore <- df_spore %>% select(all_of(human_cols_spore))
+
+# ICC(2,1) and ICC(2,k) are common when raters are considered a random sample
+icc_out_spore <- psych::ICC(human_mat_spore)
+
+print(icc_out_spore)
+
+# Calculate ICC for CV models (not that informative tbh)
+cv_mat_spore <- df_spore %>% select(all_of(cv_cols_spore))
+icc_out_cv_spore <- psych::ICC(cv_mat_spore)
+print(icc_out_cv_spore)
+
+
+df_long_humans_spore <- df_spore %>%
+  pivot_longer(cols = all_of(human_cols_spore), names_to = "rater", values_to = "human_score")
+
+
+m_human_vc_spore <- lmer(human_score ~ 1 + (1|filename) + (1|rater), data = df_long_humans_spore, REML = TRUE)
+summary(m_human_vc_spore)
+
+# Variance components for the spore model
+vc_human_spore <- as.data.frame(VarCorr(m_human_vc_spore))
+
+var_image_spore <- vc_human_spore %>% filter(grp == "filename") %>% pull(vcov)
+var_rater_spore <- vc_human_spore %>% filter(grp == "rater")    %>% pull(vcov)
+
+# Residual variance: use the SAME model object
+var_resid_spore <- attr(VarCorr(m_human_vc_spore), "sc")^2
+
+total_var_spore <- var_image_spore + var_rater_spore + var_resid_spore
+
+tibble(
+  component = c("image", "rater", "residual"),
+  variance  = c(var_image_spore, var_rater_spore, var_resid_spore),
+  pct       = 100 * variance / total_var_spore
+)
+
+
+
+df_human_summary_spore <- df_spore %>%
+  mutate(
+    human_mean = rowMeans(across(all_of(human_cols_spore)), na.rm = TRUE),
+    human_sd   = apply(select(., all_of(human_cols_spore)), 1, sd, na.rm = TRUE)
+  )
+
+cv_vs_mean_tbl_spore <- purrr::map_dfr(cv_cols_spore, \(cv) {
+  out <- metric_vs_reference(
+    dplyr::pull(df_human_summary_spore, all_of(cv)),
+    df_human_summary_spore$human_mean
+  )
+  out$model <- cv
+  out
+}) %>%
+  dplyr::relocate(model)
+
+
+cv_vs_mean_tbl_spore
+
+
+cv_vs_each_human_spore <- expand_grid(model = cv_cols_spore, rater = human_cols_spore) %>%
+  mutate(metrics = map2(model, rater, \(m, r) {
+    metric_vs_reference(df_spore[[m]], df_spore[[r]])
+  })) %>%
+  unnest(metrics)
+
+
+cv_vs_each_human_spore2 <- cv_vs_each_human_spore %>%
+  mutate(
+    CCC  = map_dbl(CCC,  ~ .x[1]),
+    cor  = map_dbl(cor,  ~ .x[1]),
+    MAE  = map_dbl(MAE,  ~ .x[1]),
+    RMSE = map_dbl(RMSE, ~ .x[1]),
+    bias = map_dbl(bias, ~ .x[1])
+  )
+
+cv_vs_each_human_spore2 %>%
+  dplyr::filter(!rater %in% c("Mean_Human_Rating", "Median_Human_Rating")) %>%
+  group_by(model) %>%
+  summarize(
+    CCC_mean = mean(CCC, na.rm = TRUE),
+    CCC_sd   = sd(CCC,  na.rm = TRUE),
+    MAE_mean = mean(MAE, na.rm = TRUE),
+    RMSE_mean= mean(RMSE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+
+
+```
+
+Wow, raters really closely agree on sporulation percentage (92% variance explained by image, only 1% by rater). 
+
+Pearson r corr for Jan26 model: 0.9815904 and CCC: 0.9803512
+
+# ------------------------------
+
+
+## Histogram distributions of human ratings
+
+
+```{r, histogram of human ratings, warning=FALSE}
+
+dist_long <- data_wide_na_rm_reordered_humans_averaged %>%
+  mutate(
+    dpi = str_extract(filename, "(?<=_)\\d+(?=dpi$)"),
+    dpi = factor(paste0(dpi, " dpi"), levels = c("5 dpi", "10 dpi"))
+  ) %>%
+  select(
+    dpi,
+    Mean_Human_Rating,
+    `Jan26_23-15-35_2026_sal0.5`
+  ) %>%
+  pivot_longer(
+    cols = c(Mean_Human_Rating, `Jan26_23-15-35_2026_sal0.5`),
+    names_to = "source",
+    values_to = "severity"
+  ) %>%
+  filter(!is.na(dpi), !is.na(severity)) %>%
+  mutate(
+    source = recode(
+      source,
+      Mean_Human_Rating = "Human (mean)",
+      `Jan26_23-15-35_2026_sal0.5` = "Computer vision"
+    )
+  )
+
+ggplot(dist_long, aes(x = severity, fill = source)) +
+  geom_density(alpha = 0.5, adjust = 1.2) +
+  facet_wrap(~ dpi, nrow = 1, scales = "fixed") +
+  labs(
+    title = "Distribution of Disease Severity by Time Point",
+    x = "Disease severity (%)",
+    y = "Density",
+    fill = "Rating source"
+  ) +
+  theme_classic()
+
+
+
+```
+## Segmentation correlation
+
+Trained a very quick and dirty one class DeepLab segmentation model (~200 training, ~40 testing) to see how it would compare. This isnt a fair comparison because obviously there is a lot more classification data, but segmentation labeling takes ages longer (up to 20 minutes per patch) so I dont think a segmentation approach is feasible at this point (especially given the classification model already does so well).
+
+```{r look_at_segmentation_correlation, message=FALSE, warning=FALSE}
+
+# 1) read in csv to segmentation_results
+#seg_path <- "C:/Users/Intel User/Desktop/blackbird_scripts/results/human_disk_assessments/segmentation/DeepLab-Feb04_00-32-07_2026/5dpi_and_10dpi_inference_summary.csv"
+
+seg_path <- "../spreadsheets/segmentation_results.csv"
+segmentation_results <- read_csv(seg_path, show_col_types = FALSE)
+#write.csv(segmentation_results, "../spreadsheets/segmentation_results.csv")
+
+# 2) pull just what we need, and de-duplicate filenames if necessary
+seg_lookup <- segmentation_results %>%
+  dplyr::select(filename, pct_infected_of_leaf) %>%
+  group_by(filename) %>%
+  summarise(pct_infected_of_leaf = mean(pct_infected_of_leaf, na.rm = TRUE), .groups = "drop")
+
+# 3) match filenames and add as a new column in your wide human dataset
+new_col_name <- "DeepLab-Feb04_00-32-07_2026"
+
+# Uncomment these if you want to include Dave
+# making this explicit for easy intelligibility
+#data_wide_na_rm_reordered_with_dg <- data_wide_na_rm %>%
+#  dplyr::select(
+#    -dplyr::ends_with("_computer_vision"),
+#    -dplyr::ends_with("_human"),
+#    dplyr::ends_with("_computer_vision"),
+#    dplyr::ends_with("_human")
+#  )
+
+# Average out the human ratings
+#data_wide_na_rm_reordered_humans_averaged_with_dg <- data_wide_na_rm_reordered_with_dg %>%
+#  dplyr::mutate(
+#    mean_human_severity   = rowMeans(dplyr::select(., dplyr::matches("_human")), na.rm = TRUE),
+#    median_human_severity = apply(dplyr::select(., dplyr::matches("_human")), 1, median, na.rm = TRUE),
+#    sd_human_severity     = apply(dplyr::select(., dplyr::matches("_human")), 1, sd, na.rm = TRUE),
+#    n_humans              = rowSums(!is.na(dplyr::select(., dplyr::matches("_human"))))
+#  ) %>%
+#  # remove any NaN
+#  drop_na()
+
+#data_wide_na_rm_reordered_humans_averaged_with_seg <- data_wide_na_rm_reordered_humans_averaged_with_dg %>%
+#  left_join(seg_lookup, by = "filename") %>%
+#  rename(!!new_col_name := pct_infected_of_leaf)
+
+# this is without Dave since he didnt recieve good instructions
+data_wide_na_rm_reordered_humans_averaged_with_seg <- data_wide_na_rm_reordered_humans_averaged %>%
+   left_join(seg_lookup, by = "filename") %>%
+   rename(!!new_col_name := pct_infected_of_leaf)
+
+# also with the sporulation dataset
+data_wide_na_rm_reordered_humans_spore_averaged_with_seg <- data_wide_na_rm_reordered_humans_spore_averaged %>%
+   left_join(seg_lookup, by = "filename") %>%
+   rename(!!new_col_name := pct_infected_of_leaf)
+
+# 4) make correlation matrices (numeric columns only)
+numeric_df_severity <- data_wide_na_rm_reordered_humans_averaged_with_seg %>%
+  na.omit()
+  
+df_plot_segmentation <- numeric_df_severity %>%
+  dplyr::select(-n_humans, -sd_human_severity) %>%
+  dplyr::select(where(is.numeric)) %>%
+  na.omit()
+  
+colnames(df_plot_segmentation) <- substr(colnames(df_plot_segmentation), 1, 12)
+  
+CairoPDF("../figs_for_pub/correlation_plots/pairs_plot_human_vs_model_segmentation.pdf",
+           width = 12, height = 12,
+           family = "Arial")
+  
+labels_12 <- substr(colnames(df_plot_segmentation), 1, 12)
+
+pairs(
+  df_plot_segmentation,
+  labels = labels_12,
+  upper.panel = NULL,
+  lower.panel = lower.panel,
+  cex.labels = 1.4
+)
+  
+  dev.off()
+  
+  
+  ##############################
+  # Print out top correlations #
+  ##############################
+
+  
+# 1) Get only the computer vision columns
+cv_cols_seg <- names(df_plot_segmentation) %>%
+  .[grepl("-", .)]
+
+
+# 2) Compute correlation vs mean_human_severity for each CV model
+cv_correlations_seg <- tibble(model = cv_cols_seg) %>%
+  mutate(
+    correlation = sapply(model, function(col) {
+      cor(
+        df_plot_segmentation[[col]],
+        df_plot_segmentation$Mean_Human_R,
+        use = "pairwise.complete.obs"
+      )
+    })
+  ) %>%
+  arrange(desc(abs(correlation)))  # sort by strongest correlation (positive or negative)
+
+# 3) Print top 5
+cv_correlations_seg %>% slice(1:50)
+
+# 200 leaf disk set with n = 5 raters
+# Jan26_23-15-	0.9692613			
+# Jan29_22-02-	0.9676133			
+# DeepLab-Feb0	0.8190004
+
+
+##############################
+#        Concordance         #
+##############################
+
+cv_cols_seg <- names(numeric_df_severity) %>%
+  .[grepl("-", .)] 
+
+human_cols_seg <- grep("Human_", names(numeric_df_severity), value = TRUE) 
+
+human_cols_seg_no_mean <- setdiff(
+  human_cols_seg,
+  c("Mean_Human_Rating", "Median_Human_Rating")
+)
+
+# without summary metrics, clean
+cv_vs_mean_tbl_seg <- purrr::map_dfr(human_cols_seg_no_mean, \(cv) {
+  out <- metric_vs_reference(
+    dplyr::pull(numeric_df_severity, all_of(cv)),
+    numeric_df_severity$Mean_Human_Rating
+  )
+  out$model <- cv
+  out
+}) %>%
+  dplyr::relocate(model)
+
+cat("Mean of human CCC with each other (n=5):\n") 
+mean(cv_vs_mean_tbl_seg$CCC)
+
+# kept the mean and median in this one
+cv_vs_each_human_seg_with_summary_metrics <- expand_grid(model = cv_cols_seg, rater = human_cols_seg) %>%
+  dplyr::mutate(metrics = map2(model, rater, \(m, r) {
+    metric_vs_reference(numeric_df_severity[[m]], numeric_df_severity[[r]])
+  })) %>%
+  unnest(metrics)
+
+
+
+cv_vs_each_human_seg_with_summary_metrics2 <- cv_vs_each_human_seg_with_summary_metrics %>%
+  mutate(
+    CCC  = map_dbl(CCC,  ~ .x[1]),
+    cor  = map_dbl(cor,  ~ .x[1]),
+    MAE  = map_dbl(MAE,  ~ .x[1]),
+    RMSE = map_dbl(RMSE, ~ .x[1]),
+    bias = map_dbl(bias, ~ .x[1])
+  )
+
+cv_vs_each_human_seg_with_summary_metrics2 %>%
+  dplyr::filter(!rater %in% c("Mean_Human_Rating", "Median_Human_Rating")) %>%
+  group_by(model) %>%
+  summarize(
+    CCC_mean = mean(CCC, na.rm = TRUE),
+    CCC_sd   = sd(CCC,  na.rm = TRUE),
+    MAE_mean = mean(MAE, na.rm = TRUE),
+    RMSE_mean= mean(RMSE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+```
+Okay so mean consensus concordance with J26 model is 0.9245640 in humans (vs mean human rating CCC with J26 model is 0.9678170). Note the difference -- for the former we take the mean after vs the later we take the mean before. 
+
+For DeepLab Feb4: 0.2454396 vs 0.2543258
+
+
+# ---------------------------------
+# Redo saliency correlations with optimized IoU saliency thresholds
+
+
+```{r saliency optimized thresholds}
+
+optimized_saliency_results_path <- "../spreadsheets/human_vs_bb_models_disase_severity.csv"
+final_joined <- read_csv(optimized_saliency_results_path, show_col_types = FALSE)
+
+##### okay, loaded the and appended the J26_fixed_0.5 (across both head) sal data ##### 
+# technically they're all fixed thresholded but the 0.5 ones are labeled 05_fixed and they're fixed to 0.5 across both heads
+
+cv_cols <- names(final_joined)[
+  grepl("J26", names(final_joined)) | grepl("DeepLab", names(final_joined))
+]
+
+
+human_cols <- grep("Human_", names(final_joined), value = TRUE) 
+
+human_cols_no_mean <- setdiff(
+  human_cols,
+  c("Mean_Human_Rating", "Median_Human_Rating")
+)
+
+
+# kept the mean and median in this one
+cv_and_sal_vs_each_human_with_summary_metrics <- expand_grid(model = cv_cols, rater = human_cols) %>%
+  dplyr::mutate(metrics = map2(model, rater, \(m, r) {
+    metric_vs_reference(final_joined[[m]], final_joined[[r]])
+  })) %>%
+  unnest(metrics)
+
+
+cv_and_sal_vs_each_human_with_summary_metrics
+
+cv_and_sal_vs_each_human_with_summary_metrics2 <- cv_and_sal_vs_each_human_with_summary_metrics %>%
+  mutate(
+    CCC  = map_dbl(CCC,  ~ .x[1]),
+    cor  = map_dbl(cor,  ~ .x[1]),
+    MAE  = map_dbl(MAE,  ~ .x[1]),
+    RMSE = map_dbl(RMSE, ~ .x[1]),
+    bias = map_dbl(bias, ~ .x[1])
+  )
+
+cv_and_sal_vs_each_human_with_summary_metrics2 %>%
+  dplyr::filter(!rater %in% c("Mean_Human_Rating", "Median_Human_Rating")) %>%
+  group_by(model) %>%
+  summarize(
+    CCC_mean = mean(CCC, na.rm = TRUE),
+    CCC_sd   = sd(CCC,  na.rm = TRUE),
+    MAE_mean = mean(MAE, na.rm = TRUE),
+    RMSE_mean= mean(RMSE, na.rm = TRUE),
+  )
+
+cv_and_sal_vs_each_human_with_summary_metrics2 %>%
+  dplyr::filter(rater == "Mean_Human_Rating")
+
+write.csv(
+  cv_and_sal_vs_each_human_with_summary_metrics2,
+  here::here("..", "spreadsheets", "human_vs_bb_models_summary_metrics.csv"),
+  row.names = FALSE
+)
+
+######### Correlation
+
+
+final_joined_select <- final_joined %>%
+  dplyr::select(-n_humans, -sd_human_severity) %>%
+  dplyr::select(where(is.numeric)) %>%
+  na.omit()
+  
+colnames(final_joined_select) <- substr(colnames(final_joined_select), 1, 20)
+  
+CairoPDF("../figs_for_pub/correlation_plots/pairs_plot_human_vs_model_optimal_saliency_thresholds.pdf",
+           width = 18, height = 18,
+           family = "Arial")
+  
+labels_12 <- substr(colnames(final_joined_select), 1, 20)
+
+pairs(
+  final_joined_select,
+  labels = labels_12,
+  upper.panel = NULL,
+  lower.panel = lower.panel,
+  cex.labels = 0.8
+)
+  
+  dev.off()
+
+  
+  
+# concordance between models? 
+
+cv_and_sal_vs_cv_sal <- expand_grid(model = cv_cols, rater = cv_cols) %>%
+dplyr::mutate(metrics = map2(model, rater, \(m, r) {
+  metric_vs_reference(final_joined[[m]], final_joined[[r]])
+})) %>%
+unnest(metrics)
+
+
+write.csv(
+  cv_and_sal_vs_cv_sal,
+  here::here("..", "spreadsheets", "model_vs_models_summary_metrics.csv"),
+  row.names = FALSE
+)
+
+```
+
+correlation with deeplab segmentation model using IoU optimized sal-threshold: 
+gradcam: 0.96
+deeplift: 0.95
+smoothgrad: 0.95
+
+correlation with deeplab segmentation model when using fixed 0.5 sal threshold (both heads): 
+gradcam 0.81
+deeplift: 0.84
+smoothgrad 0.86
+
+
+concordance with deeplab segmentation model using IoU optimized sal-threshold: 
+GradCAM 0.82
+DeepLift 0.90
+SmoothGrad 0.63
+
+concordance with deeplab segmentation when using fixed 0.5 sal threshold (both heads): 
+GradCAM 0.76
+DeepLIFT 0.24
+SmoothGrad 0.49
+
+
+\begin{table}[ht]
+\centering
+\caption[Post-inference saliency map performance of the best-performing model with and without optimized fixed intersection-over-union (IoU) thresholds.]
+{\textbf{Post-inference saliency map performance of the best-performing model with and without optimized fixed intersection-over-union (IoU) thresholds.}. 
+Pearson’s $r$ reflects the strength of linear association with the mean human ratings, while the CCC captures absolute agreement by accounting for both correlation and systematic bias. MAE = mean absolute error; RMSE = root mean square error. }
+\label{tab:saliency_jan26}
+\begin{tabular}{lccccccc}
+\toprule
+Method & Head 1 Threshold & Head 2 Threshold & Pearson $r$ & CCC & MAE & RMSE & Bias \\
+\midrule
+DeepLIFT              & 0.5 & 0.5 & 0.96 & 0.05 & 25.11 & 37.90 & -25.10        \\
+Gradient + SmoothGrad & 0.5 & 0.5 & 0.97 & 0.11 & 24.05 & 36.18 & -24.03       \\
+GradCAM               & 0.5 & 0.5 & 0.96 & 0.40 & 18.68 & 28.16 & -18.59        \\
+DeepLIFT              & 0.4 & 0.1 & 0.84 & 0.34 & 20.73 & 30.44 & -20.70 \\
+Gradient + SmoothGrad & 0.5 & 0.1 & 0.82 & 0.58 & 16.90 & 24.98 & -16.85 \\
+GradCAM               & 0.7 & 0.2 & 0.88 & 0.46 & 18.68 & 27.29 & -18.63 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
